@@ -35,6 +35,8 @@ the doc section that specifies it. No runnable code yet.
 
 Recommended next step: implement `python_ref/` (Phase 1) following `docs/model_guide.md`.
 
+Progress tracker: [`MILESTONES.md`](MILESTONES.md) — 10 project milestones, 0/10 done.
+
 ## Layout
 
 ```
