@@ -60,6 +60,7 @@ const send = (msg: ToWorker) => worker.postMessage(msg);
 let paused = false;
 let history: { step: number; trainLoss: number; valLoss?: number }[] = [];
 let lastConfig: RunConfig | null = null; // config of the in-flight / last run
+let savedThisRun = false; // did this run produce an OPFS checkpoint?
 
 // --- config ---------------------------------------------------------------
 function readConfig(): RunConfig {
@@ -77,6 +78,7 @@ function readConfig(): RunConfig {
     maxSteps: intOf("maxSteps"),
     evalEvery: DEFAULT_CONFIG.evalEvery,
     seed: DEFAULT_CONFIG.seed,
+    backend: byId<HTMLSelectElement>("backend").value === "webgpu" ? "webgpu" : "wasm",
   };
 }
 
@@ -120,6 +122,7 @@ els.start.addEventListener("click", () => {
   chart.reset();
   els.output.textContent = "Training… generate once a few steps have run.";
   els.stEta.textContent = "…";
+  savedThisRun = false;
   paused = false;
   els.pause.textContent = "Pause";
   setRunning(true);
@@ -239,6 +242,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       break;
     case "checkpoint":
       // The worker exported the trained model — persist it to OPFS.
+      savedThisRun = true;
       void saveState(new Uint8Array(msg.state));
       void saveRun({
         savedAt: new Date().toISOString(),
@@ -253,9 +257,11 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       setRunning(false);
       els.stEta.textContent = msg.reason === "finished" ? "done" : "–";
       els.status.textContent =
-        msg.reason === "finished"
-          ? "training complete — saved to storage, survives a refresh"
-          : "training stopped — progress saved";
+        msg.reason !== "finished"
+          ? "training stopped"
+          : savedThisRun
+            ? "training complete — saved to storage, survives a refresh"
+            : "training complete (WebGPU run — not checkpointed)";
       break;
     case "error":
       setRunning(false);

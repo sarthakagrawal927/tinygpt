@@ -151,6 +151,32 @@ await page.waitForFunction(
 const hfStatus = (await page.textContent("#hfStatus")) || "";
 check("Hugging Face dataset load", /loaded \d+ KB|couldn't load/.test(hfStatus), hfStatus);
 
+// Train via the WebGPU backend (stage 6) — a small model, few steps (the naive
+// per-step allocation is slow on big configs). If the worker has no WebGPU it
+// falls back to WASM; either way the run completes and the loss falls.
+await page.selectOption("#backend", "webgpu");
+await page.fill("#ctx", "32");
+await page.fill("#layers", "2");
+await page.selectOption("#dModel", "48");
+await page.fill("#batch", "8");
+await page.fill("#maxSteps", "30");
+await page.fill("#corpus", "the quick brown fox jumps over the lazy dog. ".repeat(60));
+await page.click("#start");
+await page.waitForFunction(
+  () => {
+    const s = document.getElementById("status")?.textContent || "";
+    return s.includes("complete") || /error/i.test(s);
+  },
+  undefined,
+  { timeout: 180000 },
+);
+const wgStatus = (await page.textContent("#status")) || "";
+const wgBackend = (await page.textContent("#stBackend")) || "";
+const wgLoss = parseFloat((await page.textContent("#stTrain")) || "NaN");
+check("WebGPU-backend training finished", /complete/.test(wgStatus),
+  `${wgStatus} [backend: ${wgBackend}]`);
+check("WebGPU-backend loss fell", wgLoss < 4.0, `loss ${wgLoss.toFixed(3)} on ${wgBackend}`);
+
 check("no console / page errors", errors.length === 0, errors.join(" | ") || "none");
 
 await browser.close();
