@@ -47,10 +47,10 @@ overfit/checkpoint gates; the compiled module trains from Node; a
 headless-browser e2e trains to completion (loss 5.5 → 0.017), runs the WebGPU
 benchmark, and confirms the model survives a page refresh.
 
-The full write-up of what each component does and what each experiment showed
-is in [`docs/notes.md`](docs/notes.md).
+The detailed write-up — every component, every design decision, and the
+concrete result that verified each one — is in [`docs/notes.md`](docs/notes.md).
 
-Progress tracker: [`MILESTONES.md`](MILESTONES.md) — 9/10 milestones done.
+Progress tracker: [`MILESTONES.md`](MILESTONES.md) — **10/10 milestones done**.
 Interactive-feature backlog: [`docs/feature_ideas.md`](docs/feature_ideas.md).
 
 ## Running the Python reference
