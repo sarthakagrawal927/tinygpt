@@ -18,12 +18,12 @@ Interactive-feature backlog: `docs/feature_ideas.md`.
   _Done: rank-4 adapter (8,192 params, 0.96% of total) trains (loss 4.71 → 2.25),
   saves adapter-only + reloads; base-vs-LoRA output differs. Verified on the 0.8M
   base — a 5–15M base (roadmap step 4) is still future work._
-- [ ] **4. Evaluation suite** — required correctness tests plus the
+- [x] **4. Evaluation suite** — required correctness tests plus the
   base / few-shot / LoRA / LoRA+retrieval comparison matrix.
   Phase 9 · `tests/` · `docs/evaluation.md`
-  _Partial: `tests/test_phase1.py` (8/8) + `tests/test_lora.py` (6/6) cover the
-  required correctness tests; the base/few-shot/LoRA/retrieval comparison matrix
-  is still to do._
+  _Done: `tests/test_phase1.py` (8/8) + `tests/test_lora.py` (6/6) cover the
+  required correctness tests; `python_ref/evaluate.py` produces the four-way
+  comparison matrix and the memorization check._
 - [x] **5. Browser WASM port** — C++ kernels compiled with Emscripten; training
   runs in a Web Worker without freezing the UI.
   Phase 4 · `browser/`, `wasm/` · `docs/browser_notes.md`
@@ -49,15 +49,15 @@ Interactive-feature backlog: `docs/feature_ideas.md`.
   Phase 4 · `browser/src/charts.ts`
   _Done: the browser app renders a live train/val loss chart plus step,
   tokens/sec and backend, all driven by `TrainingProgress` from the Worker._
-- [ ] **9. Clear write-up** — learning notes explaining every component and what
+- [x] **9. Clear write-up** — learning notes explaining every component and what
   each experiment showed.
   Phase 9 · `docs/`
+  _Done: `docs/notes.md` — a component-by-component tour with the concrete
+  result that verified each one._
 - [ ] **10. Public repo with experiments** — flip this repo to public with an
   experiments log once the milestones above are stable. (Currently private.)
 
 ## Progress
 
-**7 / 10 complete** — the Python reference (1, 2), LoRA (3), the browser WASM
-training app (5), the WebGPU matmul prototype (6), checkpointing (7) and the
-live metrics dashboard (8) are done and verified. Milestone 4 is partial.
-Next: milestone 4 (evaluation comparison matrix), 9 (write-up), 10 (go public).
+**9 / 10 complete** — milestones 1–9 are all done and verified end-to-end.
+The only thing left is milestone 10: pushing and flipping the repo to public.
