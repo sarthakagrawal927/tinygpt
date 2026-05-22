@@ -186,3 +186,147 @@ fn layernorm_dgb(@builtin(global_invocation_id) gid: vec3<u32>) {
   g4[dcol] = dg;
   g5[dcol] = db;
 }
+
+// --- causal multi-head attention (the SDPA core; projections are matmul) ----
+// Layout: q,k,v,ctx are [B,T,C] with C = H*hd; attn,dscores are [B,H,T,T].
+// One invocation per (b,h,t). p.a=B p.b=T p.c=C p.d=H, p.fa = 1/sqrt(hd).
+
+// attn = softmax(causal(q.kᵀ * scale))   g0=q g1=k g2=attn
+@compute @workgroup_size(64)
+fn attn_softmax(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t1 = rem % T;
+  let hd = C / H; let off = h * hd; let scale = p.fa;
+
+  var sc: array<f32, 256>;
+  var maxv = -1e30;
+  let qb = (b * T + t1) * C + off;
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    var s = 0.0;
+    let kb = (b * T + t2) * C + off;
+    for (var d = 0u; d < hd; d = d + 1u) { s = s + g0[qb + d] * g1[kb + d]; }
+    s = s * scale;
+    sc[t2] = s;
+    if (s > maxv) { maxv = s; }
+  }
+  var sum = 0.0;
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    sc[t2] = exp(sc[t2] - maxv);
+    sum = sum + sc[t2];
+  }
+  let inv = 1.0 / sum;
+  let arow = ((b * H + h) * T + t1) * T;
+  for (var t2 = 0u; t2 < T; t2 = t2 + 1u) { g2[arow + t2] = 0.0; }
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) { g2[arow + t2] = sc[t2] * inv; }
+}
+
+// ctx = attn @ v   g0=attn g1=v g2=ctx
+@compute @workgroup_size(64)
+fn attn_value(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t1 = rem % T;
+  let hd = C / H; let off = h * hd;
+  let arow = ((b * H + h) * T + t1) * T;
+  let cb = (b * T + t1) * C + off;
+  for (var d = 0u; d < hd; d = d + 1u) {
+    var acc = 0.0;
+    for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+      acc = acc + g0[arow + t2] * g1[(b * T + t2) * C + off + d];
+    }
+    g2[cb + d] = acc;
+  }
+}
+
+// dscores = softmax-backward(dattn), dattn = dctx @ vᵀ
+// g0=dctx g1=v g2=attn g3=dscores
+@compute @workgroup_size(64)
+fn attn_dscores(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t1 = rem % T;
+  let hd = C / H; let off = h * hd;
+  let arow = ((b * H + h) * T + t1) * T;
+  let cb = (b * T + t1) * C + off;
+
+  var dattn: array<f32, 256>;
+  var dot = 0.0;
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    var da = 0.0;
+    let vb = (b * T + t2) * C + off;
+    for (var d = 0u; d < hd; d = d + 1u) { da = da + g0[cb + d] * g1[vb + d]; }
+    dattn[t2] = da;
+    dot = dot + da * g2[arow + t2];
+  }
+  for (var t2 = 0u; t2 < T; t2 = t2 + 1u) { g3[arow + t2] = 0.0; }
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    g3[arow + t2] = g2[arow + t2] * (dattn[t2] - dot);
+  }
+}
+
+// dq[t1] = scale * sum_{t2<=t1} dscores[t1,t2] * k[t2]   g0=dscores g1=k g2=dq
+@compute @workgroup_size(64)
+fn attn_dq(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t1 = rem % T;
+  let hd = C / H; let off = h * hd; let scale = p.fa;
+  let arow = ((b * H + h) * T + t1) * T;
+  let qb = (b * T + t1) * C + off;
+  for (var d = 0u; d < hd; d = d + 1u) {
+    var acc = 0.0;
+    for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+      acc = acc + g0[arow + t2] * g1[(b * T + t2) * C + off + d];
+    }
+    g2[qb + d] = acc * scale;
+  }
+}
+
+// dk[t2] = scale * sum_{t1>=t2} dscores[t1,t2] * q[t1]   g0=dscores g1=q g2=dk
+@compute @workgroup_size(64)
+fn attn_dk(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t2 = rem % T;
+  let hd = C / H; let off = h * hd; let scale = p.fa;
+  let kb = (b * T + t2) * C + off;
+  for (var d = 0u; d < hd; d = d + 1u) {
+    var acc = 0.0;
+    for (var t1 = t2; t1 < T; t1 = t1 + 1u) {
+      let s = g0[((b * H + h) * T + t1) * T + t2];
+      acc = acc + s * g1[(b * T + t1) * C + off + d];
+    }
+    g2[kb + d] = acc * scale;
+  }
+}
+
+// dv[t2] = sum_{t1>=t2} attn[t1,t2] * dctx[t1]   g0=attn g1=dctx g2=dv
+@compute @workgroup_size(64)
+fn attn_dv(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t2 = rem % T;
+  let hd = C / H; let off = h * hd;
+  let vb = (b * T + t2) * C + off;
+  for (var d = 0u; d < hd; d = d + 1u) {
+    var acc = 0.0;
+    for (var t1 = t2; t1 < T; t1 = t1 + 1u) {
+      let a = g0[((b * H + h) * T + t1) * T + t2];
+      acc = acc + a * g1[(b * T + t1) * C + off + d];
+    }
+    g2[vb + d] = acc;
+  }
+}

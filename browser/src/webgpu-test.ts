@@ -189,6 +189,88 @@ async function main(): Promise<void> {
     check("layernorm backward dbeta", maxError(await bwd.dbeta.download(), refDbeta) < tol, "");
   }
 
+  // --- attention (stage 3) ------------------------------------------------
+  {
+    const B = 2, T = 12, C = 24, H = 3;
+    const hd = C / H, scale = 1 / Math.sqrt(hd);
+    const q = rand(B * T * C), k = rand(B * T * C), v = rand(B * T * C);
+    const qt = GpuTensor.fromData(dev, q);
+    const kt = GpuTensor.fromData(dev, k);
+    const vt = GpuTensor.fromData(dev, v);
+    const fwd = ops.attentionForward(qt, kt, vt, B, T, C, H);
+
+    // reference forward: causal scaled-dot-product attention
+    const refAttn = new Float32Array(B * H * T * T);
+    const refCtx = new Float32Array(B * T * C);
+    for (let b = 0; b < B; b++)
+      for (let h = 0; h < H; h++) {
+        const off = h * hd;
+        for (let t1 = 0; t1 < T; t1++) {
+          const sc: number[] = [];
+          let mx = -1e30;
+          for (let t2 = 0; t2 <= t1; t2++) {
+            let s = 0;
+            for (let d = 0; d < hd; d++)
+              s += q[(b * T + t1) * C + off + d] * k[(b * T + t2) * C + off + d];
+            s *= scale;
+            sc[t2] = s;
+            if (s > mx) mx = s;
+          }
+          let sum = 0;
+          for (let t2 = 0; t2 <= t1; t2++) { sc[t2] = Math.exp(sc[t2] - mx); sum += sc[t2]; }
+          const arow = ((b * H + h) * T + t1) * T;
+          for (let t2 = 0; t2 <= t1; t2++) refAttn[arow + t2] = sc[t2] / sum;
+          for (let d = 0; d < hd; d++) {
+            let acc = 0;
+            for (let t2 = 0; t2 <= t1; t2++)
+              acc += refAttn[arow + t2] * v[(b * T + t2) * C + off + d];
+            refCtx[(b * T + t1) * C + off + d] = acc;
+          }
+        }
+      }
+    check("attention forward attn", maxError(await fwd.attn.download(), refAttn) < tol, "");
+    check("attention forward ctx", maxError(await fwd.ctx.download(), refCtx) < tol, "");
+
+    // reference backward
+    const dctx = rand(B * T * C);
+    const bwd = ops.attentionBackward(qt, kt, vt, fwd.attn,
+      GpuTensor.fromData(dev, dctx), B, T, C, H);
+    const refDq = new Float32Array(B * T * C);
+    const refDk = new Float32Array(B * T * C);
+    const refDv = new Float32Array(B * T * C);
+    for (let b = 0; b < B; b++)
+      for (let h = 0; h < H; h++) {
+        const off = h * hd;
+        for (let t1 = 0; t1 < T; t1++) {
+          const arow = ((b * H + h) * T + t1) * T;
+          const dattn: number[] = [];
+          let dot = 0;
+          for (let t2 = 0; t2 <= t1; t2++) {
+            let da = 0;
+            for (let d = 0; d < hd; d++)
+              da += dctx[(b * T + t1) * C + off + d] * v[(b * T + t2) * C + off + d];
+            dattn[t2] = da;
+            dot += da * refAttn[arow + t2];
+          }
+          for (let t2 = 0; t2 <= t1; t2++) {
+            const ds = refAttn[arow + t2] * (dattn[t2] - dot) * scale;
+            for (let d = 0; d < hd; d++) {
+              refDq[(b * T + t1) * C + off + d] += ds * k[(b * T + t2) * C + off + d];
+              refDk[(b * T + t2) * C + off + d] += ds * q[(b * T + t1) * C + off + d];
+            }
+          }
+          for (let t2 = 0; t2 <= t1; t2++) {
+            const a = refAttn[arow + t2];
+            for (let d = 0; d < hd; d++)
+              refDv[(b * T + t2) * C + off + d] += a * dctx[(b * T + t1) * C + off + d];
+          }
+        }
+      }
+    check("attention backward dq", maxError(await bwd.dq.download(), refDq) < tol, "");
+    check("attention backward dk", maxError(await bwd.dk.download(), refDk) < tol, "");
+    check("attention backward dv", maxError(await bwd.dv.download(), refDv) < tol, "");
+  }
+
   out.textContent =
     lines.join("\n") + "\n\n" + (failed === 0 ? "ALL PASS" : "SOME TESTS FAILED");
 }

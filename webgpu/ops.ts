@@ -17,7 +17,8 @@ import { GpuTensor, type GpuContext } from "./tensor";
 const ENTRIES = [
   "matmul", "matmul_abt", "matmul_atb", "add", "bias_add", "bias_grad",
   "gelu_forward", "gelu_backward", "layernorm_forward", "layernorm_dx",
-  "layernorm_dgb",
+  "layernorm_dgb", "attn_softmax", "attn_value", "attn_dscores", "attn_dq",
+  "attn_dk", "attn_dv",
 ] as const;
 type Entry = (typeof ENTRIES)[number];
 
@@ -205,5 +206,40 @@ export class GpuOps {
     this.dispatch("layernorm_dgb", [x, mean, rstd, dy, dgamma, dbeta],
       { a: N, b: D }, Math.ceil(D / 64));
     return { dx, dgamma, dbeta };
+  }
+
+  // --- causal multi-head attention (the SDPA core) -------------------------
+  /** Scaled dot-product attention over q,k,v:[B,T,C], H heads. Returns the
+   *  softmax weights attn:[B,H,T,T] and the context ctx:[B,T,C]. */
+  attentionForward(
+    q: GpuTensor, k: GpuTensor, v: GpuTensor,
+    B: number, T: number, C: number, H: number,
+  ): { attn: GpuTensor; ctx: GpuTensor } {
+    const params = { a: B, b: T, c: C, d: H, fa: 1 / Math.sqrt(C / H) };
+    const wg = Math.ceil((B * H * T) / 64);
+    const attn = this.newTensor(B * H * T * T, "attn");
+    this.dispatch("attn_softmax", [q, k, attn], params, wg);
+    const ctx = this.newTensor(B * T * C, "ctx");
+    this.dispatch("attn_value", [attn, v, ctx], params, wg);
+    return { attn, ctx };
+  }
+
+  /** Backward of attention. Given the cached attn weights and dctx, returns
+   *  dq, dk, dv : each [B,T,C]. */
+  attentionBackward(
+    q: GpuTensor, k: GpuTensor, v: GpuTensor, attn: GpuTensor, dctx: GpuTensor,
+    B: number, T: number, C: number, H: number,
+  ): { dq: GpuTensor; dk: GpuTensor; dv: GpuTensor } {
+    const params = { a: B, b: T, c: C, d: H, fa: 1 / Math.sqrt(C / H) };
+    const wg = Math.ceil((B * H * T) / 64);
+    const dscores = this.newTensor(B * H * T * T, "dscores");
+    this.dispatch("attn_dscores", [dctx, v, attn, dscores], params, wg);
+    const dq = this.newTensor(B * T * C, "dq");
+    this.dispatch("attn_dq", [dscores, k, dq], params, wg);
+    const dk = this.newTensor(B * T * C, "dk");
+    this.dispatch("attn_dk", [dscores, q, dk], params, wg);
+    const dv = this.newTensor(B * T * C, "dv");
+    this.dispatch("attn_dv", [attn, dctx, dv], params, wg);
+    return { dq, dk, dv };
   }
 }
