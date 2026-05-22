@@ -53,12 +53,15 @@ export type ToWorker =
   | { type: "pause" }
   | { type: "resume" }
   | { type: "sample"; prompt: string; tokens: number; temperature: number }
-  | { type: "stop" };
+  | { type: "stop" }
+  | { type: "restore"; state: ArrayBuffer; config: RunConfig };
 
 /** worker -> main */
 export type FromWorker =
   | { type: "status"; message: string }
   | { type: "progress"; progress: TrainingProgress }
   | { type: "sample"; text: string }
+  | { type: "checkpoint"; state: ArrayBuffer } // serialized model state for OPFS
+  | { type: "restored" } // a saved model was reloaded into the worker
   | { type: "done"; reason: "finished" | "stopped" }
   | { type: "error"; message: string };

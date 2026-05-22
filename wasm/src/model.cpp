@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -486,4 +487,39 @@ WASM_EXPORT int tg_generate(TgModel handle, const unsigned char* prompt,
     out[produced++] = static_cast<unsigned char>(next);
   }
   return produced;
+}
+
+// --- checkpointing: serialise step + every param's w / m / v -------------
+WASM_EXPORT int tg_state_bytes(TgModel handle) {
+  Model* m = static_cast<Model*>(handle);
+  long floats = 0;
+  for (Param* p : m->params) floats += p->size();
+  return static_cast<int>(4 + floats * 3 * 4);  // int32 step + 3 buffers
+}
+
+WASM_EXPORT void tg_export_state(TgModel handle, unsigned char* dst) {
+  Model* m = static_cast<Model*>(handle);
+  const int step = static_cast<int>(m->step);
+  std::memcpy(dst, &step, 4);
+  long off = 4;
+  for (Param* p : m->params) {
+    const long n = static_cast<long>(p->size()) * 4;
+    std::memcpy(dst + off, p->w.data(), n);  off += n;
+    std::memcpy(dst + off, p->m.data(), n);  off += n;
+    std::memcpy(dst + off, p->v.data(), n);  off += n;
+  }
+}
+
+WASM_EXPORT void tg_import_state(TgModel handle, const unsigned char* src) {
+  Model* m = static_cast<Model*>(handle);
+  int step = 0;
+  std::memcpy(&step, src, 4);
+  m->step = step;
+  long off = 4;
+  for (Param* p : m->params) {
+    const long n = static_cast<long>(p->size()) * 4;
+    std::memcpy(p->w.data(), src + off, n);  off += n;
+    std::memcpy(p->m.data(), src + off, n);  off += n;
+    std::memcpy(p->v.data(), src + off, n);  off += n;
+  }
 }

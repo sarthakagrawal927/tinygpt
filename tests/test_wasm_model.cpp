@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,21 @@ int main() {
   report("generate produced max_new bytes", produced == 70, produced);
   std::printf("    greedy sample: \"%.*s\"\n", produced,
               reinterpret_cast<char*>(out));
+
+  // Checkpoint round-trip: export the state, load it into a fresh model, and
+  // confirm the fresh model produces the identical greedy continuation.
+  std::vector<unsigned char> blob(tg_state_bytes(m));
+  tg_export_state(m, blob.data());
+  TgModel m2 = tg_model_create(V, ctx, layers, heads, d_model, d_mlp, 999);
+  tg_import_state(m2, blob.data());
+  unsigned char out2[80];
+  const int produced2 =
+      tg_generate(m2, reinterpret_cast<const unsigned char*>(prompt), 4, out2, 70,
+                  0.0f, 0, 7);
+  const bool identical =
+      produced2 == produced && std::memcmp(out, out2, produced) == 0;
+  report("checkpoint round-trip reproduces output", identical, identical ? 1 : 0);
+  tg_model_free(m2);
 
   tg_model_free(m);
   std::printf("\n%s\n", g_failed == 0 ? "all WASM model tests passed"

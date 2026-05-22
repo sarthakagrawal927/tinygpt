@@ -31,15 +31,19 @@ Interactive-feature backlog: `docs/feature_ideas.md`.
   backward, verified natively (kernels 18/18 finite-diff; model overfits 5.56 →
   0.03). Compiled to WASM and driven by a Web Worker; headless-browser e2e trains
   to completion (loss 5.5 → 0.017) with the UI thread free and zero errors._
-- [ ] **6. WebGPU acceleration prototype** — one WGSL kernel (matmul) correct
+- [x] **6. WebGPU acceleration prototype** — one WGSL kernel (matmul) correct
   against WASM and measurably faster.
   Phase 5 · `webgpu/` · `docs/browser_notes.md`
-- [ ] **7. Checkpointing** — save/resume of weights + optimizer state in Python,
+  _Done: `webgpu/matmul.wgsl` compute kernel + `kernels.ts` glue; the in-app
+  benchmark checks parity vs the WASM matmul (bit-exact) and reports the
+  speed-up. Headless-browser e2e: parity OK, ~1.9× faster on a 384² matmul._
+- [x] **7. Checkpointing** — save/resume of weights + optimizer state in Python,
   then OPFS/IndexedDB in the browser; survives a page refresh.
   Phase 1 & 4 · `checkpoints/` · `browser/src/storage.ts`
-  _Partial: Python save/resume done (`python_ref/checkpoint.py`, resume verified);
-  browser OPFS persists the loss history so the chart survives a refresh
-  (`browser/src/storage.ts`); browser model-weight checkpointing is still to do._
+  _Done: Python save/resume (`python_ref/checkpoint.py`); the WASM model
+  serialises weights + AdamW moments + step (`tg_export/import_state`); the
+  browser persists that blob to OPFS. Headless e2e: the trained model and its
+  chart are restored after a page refresh and still generate._
 - [x] **8. Metrics dashboard** — live train/val loss, tokens/sec, and active
   backend rendered from `TrainingProgress`.
   Phase 4 · `browser/src/charts.ts`
@@ -53,7 +57,7 @@ Interactive-feature backlog: `docs/feature_ideas.md`.
 
 ## Progress
 
-**5 / 10 complete** — the Python reference (1, 2), LoRA (3), the browser WASM
-training app (5) and its live metrics dashboard (8) are done and verified.
-Milestones 4 and 7 are partially done (see notes above).
-Next: milestone 6 (WebGPU matmul prototype), then 9 (write-up) and 10 (go public).
+**7 / 10 complete** — the Python reference (1, 2), LoRA (3), the browser WASM
+training app (5), the WebGPU matmul prototype (6), checkpointing (7) and the
+live metrics dashboard (8) are done and verified. Milestone 4 is partial.
+Next: milestone 4 (evaluation comparison matrix), 9 (write-up), 10 (go public).

@@ -130,6 +130,17 @@ The goal here is understanding, not a clever model. If you build it yourself, by
       <div id="output">Train a model, then generate text from it here.</div>
     </div>
 
+    <div class="card" style="margin-top: 20px">
+      <h2>4 · WebGPU matmul benchmark</h2>
+      <p style="margin: 0 0 10px; color: #7d8590; font-size: 12px">
+        Runs the same matrix multiply on the WebGPU compute kernel and on the
+        WASM kernel, checks they agree, and reports the speed-up. WebGPU-capable
+        browser required (Chrome / Edge 113+).
+      </p>
+      <button id="bench" class="secondary">Run benchmark</button>
+      <div id="benchOut">Not run yet.</div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

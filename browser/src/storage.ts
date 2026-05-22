@@ -1,18 +1,17 @@
 /**
  * storage.ts — browser-local persistence via OPFS (Phase 4).
  *
- * Saves a run's lightweight state (config + loss history) to the Origin-Private
- * File System so the chart survives a page refresh. OPFS is subject to storage
- * quota; clearing site data deletes it — so durability is requested up front.
- *
- * Full model-weight checkpointing (weights + AdamW moments) is milestone 7;
- * it needs weight export/import added to the WASM C ABI. This module provides
- * the OPFS plumbing that milestone-7 work will build on.
+ * Saves a run to the Origin-Private File System so it survives a page refresh:
+ * a small JSON snapshot (config + loss history) plus a binary blob of the model
+ * state (weights + AdamW moments + step, from the WASM C ABI). OPFS is subject
+ * to storage quota; clearing site data deletes it — durability is requested up
+ * front.
  *
  * Guide: docs/browser_notes.md ("Checkpointing")
  */
 
 const RUN_FILE = "last_run.json";
+const STATE_FILE = "last_run.weights";
 
 export interface RunSnapshot {
   savedAt: string;
@@ -71,13 +70,45 @@ export async function loadRun(): Promise<RunSnapshot | null> {
   }
 }
 
-/** Delete the persisted run, if any. */
-export async function clearRun(): Promise<void> {
-  if (!opfsAvailable()) return;
+/** Persist the binary model state (from TinyGptModel.exportState()). */
+export async function saveState(state: Uint8Array): Promise<boolean> {
+  if (!opfsAvailable()) return false;
   try {
     const root = await navigator.storage.getDirectory();
-    await root.removeEntry(RUN_FILE);
+    const handle = await root.getFileHandle(STATE_FILE, { create: true });
+    const writable = await handle.createWritable();
+    // Cast pins the TS 5.7+ generic to ArrayBuffer (never SharedArrayBuffer).
+    await writable.write(state as Uint8Array<ArrayBuffer>);
+    await writable.close();
+    return true;
   } catch {
-    /* nothing to clear */
+    return false;
+  }
+}
+
+/** Load the persisted model state, or null if there is none. */
+export async function loadState(): Promise<Uint8Array | null> {
+  if (!opfsAvailable()) return null;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const handle = await root.getFileHandle(STATE_FILE);
+    const buf = await (await handle.getFile()).arrayBuffer();
+    return new Uint8Array(buf);
+  } catch {
+    return null;
+  }
+}
+
+/** Delete the persisted run (snapshot + state blob), if any. */
+export async function clearRun(): Promise<void> {
+  if (!opfsAvailable()) return;
+  const root = await navigator.storage.getDirectory().catch(() => null);
+  if (!root) return;
+  for (const name of [RUN_FILE, STATE_FILE]) {
+    try {
+      await root.removeEntry(name);
+    } catch {
+      /* nothing to clear */
+    }
   }
 }

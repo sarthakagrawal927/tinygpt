@@ -18,7 +18,7 @@ import type { FromWorker, RunConfig, ToWorker, TrainingProgress } from "./types"
 
 // Minimal typed view of the worker global — avoids DOM/WebWorker lib clashes.
 const ctx = self as unknown as {
-  postMessage(msg: FromWorker): void;
+  postMessage(msg: FromWorker, transfer?: Transferable[]): void;
   onmessage: ((e: MessageEvent<ToWorker>) => void) | null;
 };
 
@@ -28,7 +28,8 @@ let paused = false;
 let stopped = false;
 let training = false;
 
-const post = (msg: FromWorker) => ctx.postMessage(msg);
+const post = (msg: FromWorker, transfer?: Transferable[]) =>
+  ctx.postMessage(msg, transfer);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 ctx.onmessage = (e: MessageEvent<ToWorker>) => {
@@ -48,6 +49,9 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
       break;
     case "sample":
       doSample(msg.prompt, msg.tokens, msg.temperature);
+      break;
+    case "restore":
+      void doRestore(msg.state, msg.config);
       break;
   }
 };
@@ -136,6 +140,11 @@ async function runTraining(text: string, cfg: RunConfig): Promise<void> {
       }
       await sleep(0); // yield so queued pause/stop messages dispatch
     }
+    // Checkpoint the trained model so it survives a page refresh.
+    const state = model.exportState();
+    post({ type: "checkpoint", state: state.buffer as ArrayBuffer }, [
+      state.buffer as ArrayBuffer,
+    ]);
     post({ type: "done", reason: stopped ? "stopped" : "finished" });
   } catch (err) {
     post({ type: "error", message: err instanceof Error ? err.message : String(err) });
@@ -152,4 +161,31 @@ function doSample(prompt: string, tokens: number, temperature: number): void {
   const seed = (Date.now() & 0xffff) >>> 0;
   const out = model.generate(encode(prompt), tokens, temperature, 40, seed);
   post({ type: "sample", text: prompt + decode(out) });
+}
+
+// Rebuild a model from a saved checkpoint (milestone 7 — survives a refresh).
+async function doRestore(state: ArrayBuffer, config: RunConfig): Promise<void> {
+  try {
+    if (!backend) backend = await TinyGptBackend.load();
+    if (model) {
+      model.free();
+      model = null;
+    }
+    model = backend.createModel({
+      ctx: config.ctx,
+      layers: config.layers,
+      heads: config.heads,
+      dModel: config.dModel,
+      dMlp: config.dMlp,
+      seed: config.seed,
+    });
+    model.importState(new Uint8Array(state));
+    post({ type: "restored" });
+    post({
+      type: "status",
+      message: "restored the model from your last run — generate, or start a new run",
+    });
+  } catch (err) {
+    post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  }
 }

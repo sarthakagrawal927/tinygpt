@@ -45,4 +45,12 @@ WASM_EXPORT int tg_generate(TgModel m, const unsigned char* prompt,
 // Step counter (AdamW step / number of train_step calls so far).
 WASM_EXPORT int tg_model_step(TgModel m);
 
+// --- checkpointing -------------------------------------------------------
+// Serialise the full trainable state — weights, the AdamW moments m/v, and the
+// step count — so a run can be saved to OPFS and resumed after a page refresh.
+// import requires a model created with the SAME config (identical layout).
+WASM_EXPORT int tg_state_bytes(TgModel m);
+WASM_EXPORT void tg_export_state(TgModel m, unsigned char* dst);
+WASM_EXPORT void tg_import_state(TgModel m, const unsigned char* src);
+
 #endif  // TINYGPT_WASM_MODEL_H

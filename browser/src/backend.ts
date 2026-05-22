@@ -12,6 +12,7 @@
 /** The subset of the Emscripten module surface we rely on. */
 interface WasmModule {
   HEAPU8: Uint8Array;
+  HEAPF32: Float32Array;
   _malloc(bytes: number): number;
   _free(ptr: number): void;
   cwrap(name: string, ret: string | null, args: string[]): (...a: number[]) => number;
@@ -34,6 +35,10 @@ export class TinyGptBackend {
       trainStep: (...a: number[]) => number;
       evalLoss: (...a: number[]) => number;
       generate: (...a: number[]) => number;
+      matmul: (...a: number[]) => number;
+      stateBytes: (...a: number[]) => number;
+      exportState: (...a: number[]) => number;
+      importState: (...a: number[]) => number;
     },
   ) {}
 
@@ -51,7 +56,28 @@ export class TinyGptBackend {
       trainStep: m.cwrap("tg_train_step", N, [N, N, N, N]),
       evalLoss: m.cwrap("tg_eval", N, [N, N, N, N]),
       generate: m.cwrap("tg_generate", N, [N, N, N, N, N, N, N, N]),
+      matmul: m.cwrap("matmul_forward", null, [N, N, N, N, N, N]),
+      stateBytes: m.cwrap("tg_state_bytes", N, [N]),
+      exportState: m.cwrap("tg_export_state", null, [N, N]),
+      importState: m.cwrap("tg_import_state", null, [N, N]),
     });
+  }
+
+  /** Raw C = A @ B via the WASM matmul kernel — the WebGPU parity reference. */
+  matmul(a: Float32Array, b: Float32Array, M: number, K: number, N: number): Float32Array {
+    const aPtr = this.m._malloc(M * K * 4);
+    const bPtr = this.m._malloc(K * N * 4);
+    const cPtr = this.m._malloc(M * N * 4);
+    try {
+      this.m.HEAPF32.set(a, aPtr >> 2);
+      this.m.HEAPF32.set(b, bPtr >> 2);
+      this.fns.matmul(aPtr, bPtr, cPtr, M, K, N);
+      return this.m.HEAPF32.slice(cPtr >> 2, (cPtr >> 2) + M * N);
+    } finally {
+      this.m._free(aPtr);
+      this.m._free(bPtr);
+      this.m._free(cPtr);
+    }
   }
 
   /** Copy a byte buffer into the WASM heap; returns a pointer to free later. */
@@ -89,6 +115,9 @@ export class TinyGptModel {
       trainStep: (...a: number[]) => number;
       evalLoss: (...a: number[]) => number;
       generate: (...a: number[]) => number;
+      stateBytes: (...a: number[]) => number;
+      exportState: (...a: number[]) => number;
+      importState: (...a: number[]) => number;
     },
     private readonly push: (b: Uint8Array) => number,
     private readonly handle: number,
@@ -141,6 +170,28 @@ export class TinyGptModel {
     } finally {
       this.m._free(promptPtr);
       this.m._free(outPtr);
+    }
+  }
+
+  /** Serialise weights + AdamW moments + step for checkpointing. */
+  exportState(): Uint8Array {
+    const bytes = this.fns.stateBytes(this.handle);
+    const ptr = this.m._malloc(bytes);
+    try {
+      this.fns.exportState(this.handle, ptr);
+      return this.m.HEAPU8.slice(ptr, ptr + bytes);
+    } finally {
+      this.m._free(ptr);
+    }
+  }
+
+  /** Load a state blob from exportState() — model config must match. */
+  importState(state: Uint8Array): void {
+    const ptr = this.push(state);
+    try {
+      this.fns.importState(this.handle, ptr);
+    } finally {
+      this.m._free(ptr);
     }
   }
 

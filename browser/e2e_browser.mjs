@@ -1,9 +1,11 @@
-// e2e_browser.mjs — end-to-end check of the browser app (Phase 4, milestone 5).
+// e2e_browser.mjs — end-to-end check of the browser app (Phase 4-5).
 //
 // Drives the real page in headless Chromium: loads it, starts a training run,
 // and verifies that (1) training runs to completion in the Web Worker,
-// (2) the loss actually falls, (3) sampling works, and (4) no console or page
-// errors occurred. This is the milestone-5 acceptance test.
+// (2) the loss actually falls, (3) sampling works, (4) the WebGPU matmul
+// benchmark matches WASM (milestone 6 — skipped if headless has no WebGPU),
+// (5) the trained model survives a page refresh (milestone 7), and (6) no
+// console or page errors occurred.
 //
 // Run from browser/:
 //   npm run build && npm run preview &   # build + serve the app
@@ -20,7 +22,9 @@ const check = (name, ok, detail) => {
   if (!ok) failed++;
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({
+  args: ["--enable-unsafe-webgpu", "--enable-features=Vulkan"],
+});
 const page = await browser.newPage();
 
 const errors = [];
@@ -70,6 +74,50 @@ await page.waitForFunction(
 const sample = await page.textContent("#output");
 check("generated a non-empty sample", (sample || "").length > 10, `${(sample || "").length} chars`);
 console.log(`    sample: ${JSON.stringify((sample || "").slice(0, 80))}`);
+
+// WebGPU matmul benchmark (milestone 6). Headless Chromium may lack WebGPU —
+// that is reported as a skip, not a failure.
+await page.click("#bench");
+await page.waitForFunction(
+  () => {
+    const t = document.getElementById("benchOut")?.textContent || "";
+    return t !== "Not run yet." && !t.endsWith("…");
+  },
+  undefined,
+  { timeout: 90000 },
+);
+const bench = (await page.textContent("#benchOut")) || "";
+if (/not available/i.test(bench)) {
+  console.log(`skip WebGPU benchmark                       (no WebGPU in headless Chromium)`);
+} else {
+  check("WebGPU matmul matches WASM", /parity OK/.test(bench), bench.replace(/\n/g, " "));
+}
+
+// Checkpointing (milestone 7): the trained model survives a page refresh.
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(
+  () => {
+    const s = document.getElementById("status")?.textContent || "";
+    return /restored/i.test(s) || s.startsWith("error");
+  },
+  undefined,
+  { timeout: 30000 },
+);
+const restoredStatus = await page.textContent("#status");
+check("model restored after page refresh", /restored/i.test(restoredStatus || ""), restoredStatus);
+check("loss chart restored after refresh", (await page.textContent("#stStep")) === "400",
+  await page.textContent("#stStep"));
+await page.click("#sample");
+await page.waitForFunction(
+  () => {
+    const t = document.getElementById("output")?.textContent || "";
+    return t.length > 0 && t !== "generating…";
+  },
+  undefined,
+  { timeout: 30000 },
+);
+check("restored model still generates", ((await page.textContent("#output")) || "").length > 10,
+  "ok");
 
 check("no console / page errors", errors.length === 0, errors.join(" | ") || "none");
 

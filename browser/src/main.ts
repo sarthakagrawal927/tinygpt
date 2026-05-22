@@ -8,9 +8,11 @@
  * Guide: docs/browser_notes.md ("Web Worker")
  */
 
+import { benchmarkMatmul, initWebGPU } from "../../webgpu/kernels";
+import { TinyGptBackend } from "./backend";
 import { LossChart } from "./charts";
 import { detectCapabilities } from "./runtime_detect";
-import { loadRun, requestDurableStorage, saveRun } from "./storage";
+import { loadRun, loadState, requestDurableStorage, saveRun, saveState } from "./storage";
 import { DEFAULT_CONFIG, type FromWorker, type RunConfig, type ToWorker } from "./types";
 
 const byId = <T extends HTMLElement>(id: string): T =>
@@ -30,6 +32,8 @@ const els = {
   stVal: byId<HTMLElement>("stVal"),
   stToks: byId<HTMLElement>("stToks"),
   stBackend: byId<HTMLElement>("stBackend"),
+  bench: byId<HTMLButtonElement>("bench"),
+  benchOut: byId<HTMLDivElement>("benchOut"),
 };
 
 const canvas = byId<HTMLCanvasElement>("chart");
@@ -44,6 +48,7 @@ const send = (msg: ToWorker) => worker.postMessage(msg);
 
 let paused = false;
 let history: { step: number; trainLoss: number; valLoss?: number }[] = [];
+let lastConfig: RunConfig | null = null; // config of the in-flight / last run
 
 // --- config ---------------------------------------------------------------
 function readConfig(): RunConfig {
@@ -85,7 +90,8 @@ els.start.addEventListener("click", () => {
   els.pause.textContent = "Pause";
   setRunning(true);
   els.sample.disabled = false;
-  send({ type: "train", text, config: readConfig() });
+  lastConfig = readConfig();
+  send({ type: "train", text, config: lastConfig });
 });
 
 els.pause.addEventListener("click", () => {
@@ -104,6 +110,38 @@ els.sample.addEventListener("click", () => {
     temperature: parseFloat(byId<HTMLInputElement>("temp").value),
   });
   els.output.textContent = "generating…";
+});
+
+// --- WebGPU matmul benchmark (milestone 6) --------------------------------
+els.bench.addEventListener("click", async () => {
+  els.bench.disabled = true;
+  els.benchOut.textContent = "initialising WebGPU…";
+  try {
+    const device = await initWebGPU();
+    if (!device) {
+      els.benchOut.textContent = "WebGPU is not available in this browser.";
+      return;
+    }
+    els.benchOut.textContent = "loading the WASM matmul kernel…";
+    const backend = await TinyGptBackend.load();
+    els.benchOut.textContent = "running 384×384 matmul on WebGPU and WASM…";
+    const r = await benchmarkMatmul(
+      device,
+      (a, b, M, K, N) => backend.matmul(a, b, M, K, N),
+      384,
+    );
+    els.benchOut.textContent =
+      `${r.size}×${r.size} matmul — ${r.parityOk ? "parity OK ✓" : "PARITY FAILED"} ` +
+      `(max abs error ${r.maxAbsError.toExponential(2)})\n` +
+      `WASM ${r.refMs.toFixed(1)} ms · WebGPU ${r.gpuMs.toFixed(1)} ms · ` +
+      `${r.speedup.toFixed(1)}× speed-up`;
+  } catch (err) {
+    els.benchOut.textContent = `benchmark error: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+  } finally {
+    els.bench.disabled = false;
+  }
 });
 
 // --- worker messages ------------------------------------------------------
@@ -127,15 +165,24 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
     case "sample":
       els.output.textContent = msg.text;
       break;
+    case "checkpoint":
+      // The worker exported the trained model — persist it to OPFS.
+      void saveState(new Uint8Array(msg.state));
+      void saveRun({
+        savedAt: new Date().toISOString(),
+        config: lastConfig ?? readConfig(),
+        lossHistory: history,
+      });
+      break;
+    case "restored":
+      els.sample.disabled = false;
+      break;
     case "done":
       setRunning(false);
       els.status.textContent =
-        msg.reason === "finished" ? "training complete" : "training stopped";
-      void saveRun({
-        savedAt: new Date().toISOString(),
-        config: readConfig(),
-        lossHistory: history,
-      });
+        msg.reason === "finished"
+          ? "training complete — saved to storage, survives a refresh"
+          : "training stopped — progress saved";
       break;
     case "error":
       setRunning(false);
@@ -162,12 +209,23 @@ async function init(): Promise<void> {
     `<span class="pill on">training backend: ${caps.active}</span>` +
     `<span class="pill off">OPFS quota ~${storage.quotaMB} MB</span>`;
 
-  // Restore the previous run's chart, if one was persisted.
+  // Restore the previous run — the loss chart and the trained model — so it
+  // survives a page refresh (milestone 7).
   const prev = await loadRun();
+  const prevState = await loadState();
   if (prev && prev.lossHistory.length > 0) {
     history = prev.lossHistory;
     for (const pt of history) chart.addPoint(pt);
-    els.status.textContent = `restored chart from a previous run (${history.length} points)`;
+    const last = history[history.length - 1];
+    els.stStep.textContent = String(last.step);
+    els.stTrain.textContent = last.trainLoss.toFixed(4);
+    els.stVal.textContent = last.valLoss?.toFixed(4) ?? "–";
+  }
+  if (prev && prevState) {
+    lastConfig = prev.config as RunConfig;
+    const buffer = prevState.buffer as ArrayBuffer;
+    worker.postMessage({ type: "restore", state: buffer, config: lastConfig }, [buffer]);
+    els.status.textContent = "restoring your last model from storage…";
   }
 }
 
