@@ -93,6 +93,7 @@ WASM_EXPORT void attention_forward(
   linear_forward(x, Wk, bk, k, BT, C, C);
   linear_forward(x, Wv, bv, v, BT, C, C);
 
+  std::vector<float> sc(T);  // per-row score scratch, reused across all rows
   for (int b = 0; b < B; ++b)
     for (int h = 0; h < H; ++h) {
       const int off = h * hd;
@@ -101,7 +102,6 @@ WASM_EXPORT void attention_forward(
         float* arow = attn + ((static_cast<long>((b * H + h) * T) + t1) * T);
 
         // scores over the unmasked range [0, t1], with max-subtraction.
-        std::vector<float> sc(t1 + 1);
         float maxv = -1e30f;
         for (int t2 = 0; t2 <= t1; ++t2) {
           const float* k2 = k + (static_cast<long>(b * T + t2) * C) + off;
@@ -148,6 +148,7 @@ WASM_EXPORT void attention_backward(
   std::vector<float> dk(static_cast<long>(BT) * C, 0.0f);
   std::vector<float> dv(static_cast<long>(BT) * C, 0.0f);
 
+  std::vector<float> dattn(T);  // per-row scratch, reused across all rows
   for (int b = 0; b < B; ++b)
     for (int h = 0; h < H; ++h) {
       const int off = h * hd;
@@ -156,7 +157,6 @@ WASM_EXPORT void attention_backward(
         const float* arow = attn + ((static_cast<long>((b * H + h) * T) + t1) * T);
 
         // dattn[t2] = sum_d dctx[t1,d] * v[t2,d];  dv accumulates attn^T @ dctx.
-        std::vector<float> dattn(t1 + 1);
         for (int t2 = 0; t2 <= t1; ++t2) {
           const float* v2 = v + (static_cast<long>(b * T + t2) * C) + off;
           float* dv2 = dv.data() + (static_cast<long>(b * T + t2) * C) + off;

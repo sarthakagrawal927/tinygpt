@@ -86,6 +86,27 @@ struct Acts {
   std::vector<LayerAct> layer;
 };
 
+// Backward-pass scratch buffers, cached on the Model and reused every step
+// (re-sized only when the batch shape changes) — avoids ~12 heap allocations
+// per training step.
+struct Bwd {
+  int N = -1, C = 0, M = 0, V = 0;
+  std::vector<float> dlnf, det, dnext, dmo, dr1, dr1ln, dhact, dhpre, dln2o,
+      dao, dln1o, dbi, dbiln;
+  void resize(int n, int c, int m, int v) {
+    if (N == n && C == c && M == m && V == v) return;
+    N = n; C = c; M = m; V = v;
+    const long nc = static_cast<long>(n) * c, nm = static_cast<long>(n) * m;
+    dlnf.assign(nc, 0.0f);
+    det.assign(static_cast<long>(c) * v, 0.0f);
+    dnext.assign(nc, 0.0f);
+    dmo.assign(nc, 0.0f);   dr1.assign(nc, 0.0f);   dr1ln.assign(nc, 0.0f);
+    dhact.assign(nm, 0.0f); dhpre.assign(nm, 0.0f);
+    dln2o.assign(nc, 0.0f); dao.assign(nc, 0.0f);   dln1o.assign(nc, 0.0f);
+    dbi.assign(nc, 0.0f);   dbiln.assign(nc, 0.0f);
+  }
+};
+
 struct Model {
   int V, ctx, L, H, C, M, hd;
   long step = 0;
@@ -99,6 +120,7 @@ struct Model {
   int n_train = 0;
 
   Acts acts;            // forward cache, reused across steps
+  Bwd bwd;              // backward scratch, reused across steps
   std::vector<float> et;  // transposed tok_emb [C,V] for the tied head
 };
 
@@ -253,8 +275,13 @@ void backward(Model& m, const int* ids, const float* dlogits) {
 
   for (Param* p : m.params) std::fill(p->g.begin(), p->g.end(), 0.0f);
 
+  // Reused scratch — sized once per batch shape, not allocated per step.
+  m.bwd.resize(N, C, M, V);
+  auto& dlnf = m.bwd.dlnf;
+  auto& det = m.bwd.det;
+  auto& dnext = m.bwd.dnext;
+
   // head backward: logits = lnf_o @ et  ->  dlnf_o, det  (det:[C,V] -> tok_emb)
-  std::vector<float> dlnf(N * C), det(static_cast<long>(C) * V);
   matmul_backward(a.lnf_o.data(), m.et.data(), dlogits, dlnf.data(), det.data(),
                   N, C, V);
   for (int vi = 0; vi < V; ++vi)
@@ -262,16 +289,21 @@ void backward(Model& m, const int* ids, const float* dlogits) {
 
   // final LayerNorm backward
   const float* last = m.layers.empty() ? a.x0.data() : a.layer.back().r2.data();
-  std::vector<float> dnext(N * C);
   layernorm_backward(last, m.ln_f_g.w.data(), a.meanf.data(), a.rstdf.data(),
                      dlnf.data(), dnext.data(), m.ln_f_g.g.data(),
                      m.ln_f_b.g.data(), N, C);
 
-  // reusable scratch
-  std::vector<float> dmo(N * C), dr1(N * C), dr1ln(N * C);
-  std::vector<float> dhact(N * M), dhpre(N * M);
-  std::vector<float> dln2o(N * C), dao(N * C), dln1o(N * C);
-  std::vector<float> dbi(N * C), dbiln(N * C);
+  // reusable per-layer scratch (cached on the model, see struct Bwd)
+  auto& dmo = m.bwd.dmo;
+  auto& dr1 = m.bwd.dr1;
+  auto& dr1ln = m.bwd.dr1ln;
+  auto& dhact = m.bwd.dhact;
+  auto& dhpre = m.bwd.dhpre;
+  auto& dln2o = m.bwd.dln2o;
+  auto& dao = m.bwd.dao;
+  auto& dln1o = m.bwd.dln1o;
+  auto& dbi = m.bwd.dbi;
+  auto& dbiln = m.bwd.dbiln;
 
   for (int l = m.L - 1; l >= 0; --l) {
     Layer& w = m.layers[l];
