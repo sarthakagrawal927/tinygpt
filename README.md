@@ -133,3 +133,7 @@ The learning curriculum is also mirrored into the `swe-interview-prep` fleet pro
 - Phase 1–3: Python 3.10+, PyTorch, NumPy (`python_ref/requirements.txt`)
 - Phase 4: Node.js, a bundler (Vite), Emscripten SDK
 - Phase 5: a WebGPU-capable browser (Chrome/Edge 113+, feature-detected)
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Fork it, read it, learn from it.
