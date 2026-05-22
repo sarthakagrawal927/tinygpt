@@ -271,6 +271,80 @@ async function main(): Promise<void> {
     check("attention backward dv", maxError(await bwd.dv.download(), refDv) < tol, "");
   }
 
+  // --- embeddings / cross-entropy / optimizer (stage 4) ------------------
+  {
+    const B = 2, T = 6, C = 8, V = 20, N = B * T;
+    const tok = rand(V * C), pos = rand(T * C);
+    const ids = new Float32Array(N);
+    for (let i = 0; i < N; i++) ids[i] = Math.floor(Math.random() * V);
+
+    const x = await ops
+      .embedForward(GpuTensor.fromData(dev, tok), GpuTensor.fromData(dev, pos),
+        GpuTensor.fromData(dev, ids), N, C, T)
+      .download();
+    const refX = new Float32Array(N * C);
+    for (let n = 0; n < N; n++)
+      for (let c = 0; c < C; c++)
+        refX[n * C + c] = tok[ids[n] * C + c] + pos[(n % T) * C + c];
+    check("embed forward", maxError(x, refX) < tol, "");
+
+    const dx = rand(N * C);
+    const dtok = await ops
+      .embedTokGrad(GpuTensor.fromData(dev, dx), GpuTensor.fromData(dev, ids), N, C, V)
+      .download();
+    const refDtok = new Float32Array(V * C);
+    for (let n = 0; n < N; n++)
+      for (let c = 0; c < C; c++) refDtok[ids[n] * C + c] += dx[n * C + c];
+    check("embed tok grad", maxError(dtok, refDtok) < tol, "");
+
+    const dpos = await ops.embedPosGrad(GpuTensor.fromData(dev, dx), N, C, T).download();
+    const refDpos = new Float32Array(T * C);
+    for (let n = 0; n < N; n++)
+      for (let c = 0; c < C; c++) refDpos[(n % T) * C + c] += dx[n * C + c];
+    check("embed pos grad", maxError(dpos, refDpos) < tol, "");
+
+    const Nc = 10, Vc = 20;
+    const logits = rand(Nc * Vc, 3);
+    const tgts = new Float32Array(Nc);
+    for (let i = 0; i < Nc; i++) tgts[i] = Math.floor(Math.random() * Vc);
+    const ce = ops.crossEntropy(GpuTensor.fromData(dev, logits),
+      GpuTensor.fromData(dev, tgts), Nc, Vc);
+    const dl = await ce.dlogits.download();
+    const refDl = new Float32Array(Nc * Vc);
+    for (let n = 0; n < Nc; n++) {
+      const base = n * Vc;
+      let mx = logits[base];
+      for (let v = 1; v < Vc; v++) mx = Math.max(mx, logits[base + v]);
+      let sum = 0;
+      for (let v = 0; v < Vc; v++) sum += Math.exp(logits[base + v] - mx);
+      for (let v = 0; v < Vc; v++) {
+        const pr = Math.exp(logits[base + v] - mx) / sum;
+        refDl[base + v] = (pr - (v === tgts[n] ? 1 : 0)) / Nc;
+      }
+    }
+    check("cross-entropy dlogits", maxError(dl, refDl) < tol, "");
+
+    const cnt = 16, step = 3, lr = 0.01, wd = 0.1;
+    const pm = rand(cnt), gr = rand(cnt);
+    const mm = rand(cnt, 0.1);
+    const vv = rand(cnt, 0.1).map((z) => Math.abs(z));
+    const pt = GpuTensor.fromData(dev, pm);
+    const mt = GpuTensor.fromData(dev, mm);
+    const vt = GpuTensor.fromData(dev, vv);
+    ops.adamwStep(pt, GpuTensor.fromData(dev, gr), mt, vt, cnt, step, lr, wd);
+    const pAfter = await pt.download();
+    const refP = new Float32Array(cnt);
+    const b1 = 0.9, b2 = 0.95, eps = 1e-8;
+    for (let i = 0; i < cnt; i++) {
+      const m = b1 * mm[i] + (1 - b1) * gr[i];
+      const v = b2 * vv[i] + (1 - b2) * gr[i] * gr[i];
+      const mh = m / (1 - Math.pow(b1, step));
+      const vh = v / (1 - Math.pow(b2, step));
+      refP[i] = pm[i] - lr * (mh / (Math.sqrt(vh) + eps) + wd * pm[i]);
+    }
+    check("adamw step", maxError(pAfter, refP) < tol, "");
+  }
+
   out.textContent =
     lines.join("\n") + "\n\n" + (failed === 0 ? "ALL PASS" : "SOME TESTS FAILED");
 }

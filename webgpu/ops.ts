@@ -18,7 +18,8 @@ const ENTRIES = [
   "matmul", "matmul_abt", "matmul_atb", "add", "bias_add", "bias_grad",
   "gelu_forward", "gelu_backward", "layernorm_forward", "layernorm_dx",
   "layernorm_dgb", "attn_softmax", "attn_value", "attn_dscores", "attn_dq",
-  "attn_dk", "attn_dv",
+  "attn_dk", "attn_dv", "embed_forward", "embed_tok_grad", "embed_pos_grad",
+  "cross_entropy", "adamw",
 ] as const;
 type Entry = (typeof ENTRIES)[number];
 
@@ -241,5 +242,53 @@ export class GpuOps {
     const dv = this.newTensor(B * T * C, "dv");
     this.dispatch("attn_dv", [attn, dctx, dv], params, wg);
     return { dq, dk, dv };
+  }
+
+  // --- embeddings, cross-entropy, optimizer --------------------------------
+  /** x[n] = tok_emb[id[n]] + pos_emb[n mod T].  ids holds int values as f32. */
+  embedForward(
+    tokEmb: GpuTensor, posEmb: GpuTensor, ids: GpuTensor,
+    N: number, C: number, T: number,
+  ): GpuTensor {
+    const x = this.newTensor(N * C, "embed.x");
+    this.dispatch("embed_forward", [tokEmb, posEmb, ids, x],
+      { a: N, b: C, c: T }, Math.ceil((N * C) / 64));
+    return x;
+  }
+
+  /** Token-embedding gradient: dtok[v] = sum of dx over rows with that id. */
+  embedTokGrad(dx: GpuTensor, ids: GpuTensor, N: number, C: number, V: number): GpuTensor {
+    const dtok = this.newTensor(V * C, "embed.dtok");
+    this.dispatch("embed_tok_grad", [dx, ids, dtok],
+      { a: N, b: C, c: V }, Math.ceil((V * C) / 64));
+    return dtok;
+  }
+
+  /** Position-embedding gradient: dpos[t] = sum of dx over the batch. */
+  embedPosGrad(dx: GpuTensor, N: number, C: number, T: number): GpuTensor {
+    const dpos = this.newTensor(T * C, "embed.dpos");
+    this.dispatch("embed_pos_grad", [dx, dpos],
+      { a: N, b: C, c: T }, Math.ceil((T * C) / 64));
+    return dpos;
+  }
+
+  /** Cross-entropy. Returns dlogits:[N,V] and per-row loss:[N] (sum on host). */
+  crossEntropy(
+    logits: GpuTensor, targets: GpuTensor, N: number, V: number,
+  ): { dlogits: GpuTensor; loss: GpuTensor } {
+    const dlogits = this.newTensor(N * V, "ce.dlogits");
+    const loss = this.newTensor(N, "ce.loss");
+    this.dispatch("cross_entropy", [logits, targets, dlogits, loss],
+      { a: N, b: V }, Math.ceil(N / 64));
+    return { dlogits, loss };
+  }
+
+  /** In-place AdamW step over one parameter buffer (betas/eps are fixed). */
+  adamwStep(
+    param: GpuTensor, grad: GpuTensor, m: GpuTensor, v: GpuTensor,
+    count: number, step: number, lr: number, weightDecay: number,
+  ): void {
+    this.dispatch("adamw", [param, grad, m, v],
+      { a: count, b: step, fa: lr, fb: weightDecay }, Math.ceil(count / 64));
   }
 }

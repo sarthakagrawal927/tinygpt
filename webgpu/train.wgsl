@@ -330,3 +330,95 @@ fn attn_dv(@builtin(global_invocation_id) gid: vec3<u32>) {
     g2[vb + d] = acc;
   }
 }
+
+// --- embeddings, cross-entropy, optimizer (stage 4) ------------------------
+
+// x = tok_emb[id] + pos_emb[t]   g0=tok_emb[V,C] g1=pos_emb[Tctx,C]
+//   g2=ids[N] (int values as f32)  g3=x[N,C]   p.a=N p.b=C p.c=T
+@compute @workgroup_size(64)
+fn embed_forward(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let N = p.a; let C = p.b; let T = p.c;
+  let i = gid.x;
+  if (i >= N * C) { return; }
+  let n = i / C; let c = i % C;
+  let id = u32(g2[n]);
+  let t = n % T;
+  g3[i] = g0[id * C + c] + g1[t * C + c];
+}
+
+// dtok[v,c] = sum over rows whose token id == v of dx[n,c]
+// g0=dx[N,C] g1=ids[N] g2=dtok[V,C]   p.a=N p.b=C p.c=V
+@compute @workgroup_size(64)
+fn embed_tok_grad(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let N = p.a; let C = p.b; let V = p.c;
+  let i = gid.x;
+  if (i >= V * C) { return; }
+  let v = i / C; let c = i % C;
+  var s = 0.0;
+  for (var n = 0u; n < N; n = n + 1u) {
+    if (u32(g1[n]) == v) { s = s + g0[n * C + c]; }
+  }
+  g2[i] = s;
+}
+
+// dpos[t,c] = sum over batch of dx[(b*T+t),c]   g0=dx[N,C] g1=dpos[T,C]
+//   p.a=N p.b=C p.c=T
+@compute @workgroup_size(64)
+fn embed_pos_grad(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let N = p.a; let C = p.b; let T = p.c;
+  let i = gid.x;
+  if (i >= T * C) { return; }
+  let t = i / C; let c = i % C;
+  var s = 0.0;
+  var n = t;
+  loop {
+    if (n >= N) { break; }
+    s = s + g0[n * C + c];
+    n = n + T;
+  }
+  g1[i] = s;
+}
+
+// Per row: softmax over the vocab, the loss, and dlogits = (softmax - onehot)/N.
+// g0=logits[N,V] g1=targets[N] g2=dlogits[N,V] g3=loss[N]   p.a=N p.b=V
+@compute @workgroup_size(64)
+fn cross_entropy(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let N = p.a; let V = p.b;
+  let n = gid.x;
+  if (n >= N) { return; }
+  let base = n * V;
+  var mx = g0[base];
+  for (var v = 1u; v < V; v = v + 1u) {
+    let x = g0[base + v];
+    if (x > mx) { mx = x; }
+  }
+  var sum = 0.0;
+  for (var v = 0u; v < V; v = v + 1u) { sum = sum + exp(g0[base + v] - mx); }
+  let tgt = u32(g1[n]);
+  g3[n] = -((g0[base + tgt] - mx) - log(sum));
+  let invN = 1.0 / f32(N);
+  for (var v = 0u; v < V; v = v + 1u) {
+    let prob = exp(g0[base + v] - mx) / sum;
+    var onehot = 0.0;
+    if (v == tgt) { onehot = 1.0; }
+    g2[base + v] = (prob - onehot) * invN;
+  }
+}
+
+// In-place AdamW step. g0=param g1=grad g2=m g3=v
+//   p.a=count p.b=step  p.fa=lr p.fb=weight_decay  (betas/eps fixed)
+@compute @workgroup_size(64)
+fn adamw(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.a) { return; }
+  let b1 = 0.9; let b2 = 0.95; let eps = 1e-8;
+  let step = f32(p.b);
+  let g = g1[i];
+  let m = b1 * g2[i] + (1.0 - b1) * g;
+  let v = b2 * g3[i] + (1.0 - b2) * g * g;
+  g2[i] = m;
+  g3[i] = v;
+  let mhat = m / (1.0 - pow(b1, step));
+  let vhat = v / (1.0 - pow(b2, step));
+  g0[i] = g0[i] - p.fa * (mhat / (sqrt(vhat) + eps) + p.fb * g0[i]);
+}
