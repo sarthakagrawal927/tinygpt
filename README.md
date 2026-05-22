@@ -7,6 +7,14 @@ Python reference first, then ported to WASM, then accelerated with WebGPU.
 This is a learning sandbox, not a deployed fleet product. The goal is **correctness
 and understanding**, not impressive output.
 
+## New to AI? Start here → [`docs/learn.md`](docs/learn.md)
+
+If you are a software engineer with little or no machine-learning background,
+**[`docs/learn.md`](docs/learn.md)** is a guided path through this *entire* repo.
+For each concept it links the best free explainer, then the exact file that
+implements it here, then the test that proves it works — in order, until none of
+it is a black box. Read that first; the rest of this README is the reference map.
+
 ## Two browser targets
 
 | Mode               | Purpose                              | Model                                  |
@@ -108,6 +116,7 @@ tinygpt/
 
 ## Docs
 
+- `docs/learn.md` — **the guided learning path — start here if you're new to AI**
 - `docs/model_guide.md` — building the TinyGPT model from scratch (Phase 1–2)
 - `docs/lora_guide.md` — LoRA fine-tuning (Phase 3)
 - `docs/learning_roadmap.md` — the 9-phase + 12-week learning curriculum
