@@ -1,0 +1,23 @@
+A small model learns one thing at a time.
+
+First it learns that letters follow letters. After a space, another word tends to begin. After a period, a capital letter often comes next. These are shallow patterns, but a tiny network can hold them.
+
+Then it learns short words. The word "the" appears again and again. So does "and", "of", "to", and "a". A model that predicts the next byte will quickly learn to expect these common words, because guessing them correctly lowers the loss on almost every line.
+
+Training is slow at the start and fast in the middle. At the start the model knows nothing, so its loss sits near the value you would get by guessing uniformly. In the middle the loss falls quickly as the model picks up the easy patterns. Near the end the loss falls slowly, because what remains is hard: rare words, long-range structure, and the meaning behind the text.
+
+A byte-level model has a small vocabulary. There are only two hundred and fifty six possible bytes, so the model never has to choose among thousands of tokens. This keeps the output layer small and the math easy to follow. The cost is that the model must spell every word one byte at a time.
+
+Attention lets a position look back at earlier positions. When the model reads the word "it", attention can search the earlier text for the thing that "it" refers to. A causal mask makes sure the model never looks forward, because at prediction time the future is not yet known.
+
+The transformer block has two parts. The first part is attention, which mixes information across positions. The second part is a small feed-forward network, which processes each position on its own. A residual connection adds the input back to the output, so gradients can flow through many layers without fading away.
+
+Layer normalization keeps the numbers in a healthy range. Without it, the values inside the network can drift, grow, or shrink until training becomes unstable. With it, each layer sees inputs of a steady scale, and the model trains far more reliably.
+
+Overfitting is not always a failure. When you train a tiny model on a tiny file, you want it to overfit. If the loss does not fall close to zero on a small repeated text, something is broken in the model, the gradients, or the data pipeline. Fix that first. Scaling a broken model only wastes time.
+
+Sampling turns a trained model into a writer. You give it a short prompt, ask for the next byte, append that byte, and repeat. Temperature controls how bold the model is. A low temperature makes it cautious and repetitive. A high temperature makes it wild and strange. Somewhere in between, the text reads best.
+
+Checkpoints make a long run safe. You save the weights and the optimizer state to disk. If the run stops, you load them back and continue from the same place. Saving the optimizer state matters, because the optimizer holds running averages that took many steps to build.
+
+The goal of this project is understanding, not a clever model. A tiny model trained on a tiny corpus will never say anything wise. But if you build it yourself, byte by byte and layer by layer, you will understand exactly how every larger model works.

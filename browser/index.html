@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TinyGPT — train a tiny GPT in your browser</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 24px;
+        font: 14px/1.5 system-ui, sans-serif;
+        background: #010409; color: #e6edf3;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .sub { color: #7d8590; margin: 0 0 20px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+      @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+      .card {
+        background: #0d1117; border: 1px solid #30363d;
+        border-radius: 8px; padding: 16px;
+      }
+      .card h2 { font-size: 13px; text-transform: uppercase;
+        letter-spacing: .04em; color: #7d8590; margin: 0 0 12px; }
+      textarea {
+        width: 100%; height: 150px; resize: vertical;
+        background: #010409; color: #e6edf3;
+        border: 1px solid #30363d; border-radius: 6px;
+        padding: 8px; font: 12px/1.45 ui-monospace, monospace;
+      }
+      label { display: flex; justify-content: space-between;
+        align-items: center; gap: 8px; margin: 6px 0; color: #adbac7; }
+      input[type="number"], select, input[type="text"] {
+        background: #010409; color: #e6edf3;
+        border: 1px solid #30363d; border-radius: 6px;
+        padding: 5px 8px; width: 120px;
+      }
+      .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      button {
+        background: #238636; color: #fff; border: 0;
+        border-radius: 6px; padding: 7px 14px; cursor: pointer; font-weight: 600;
+      }
+      button.secondary { background: #21262d; color: #e6edf3;
+        border: 1px solid #30363d; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      canvas { width: 100%; height: 220px; border-radius: 6px; display: block; }
+      .stats { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px;
+        font: 12px ui-monospace, monospace; color: #adbac7; }
+      .stats b { color: #e6edf3; }
+      #status { margin-top: 10px; color: #7d8590; font-size: 12px;
+        min-height: 16px; }
+      #output { white-space: pre-wrap; background: #010409;
+        border: 1px solid #30363d; border-radius: 6px; padding: 10px;
+        font: 12px/1.5 ui-monospace, monospace; min-height: 70px;
+        color: #adbac7; margin-top: 8px; }
+      .pill { display: inline-block; padding: 1px 7px; border-radius: 10px;
+        font-size: 11px; border: 1px solid #30363d; margin-right: 6px; }
+      .pill.on { color: #3fb950; border-color: #238636; }
+      .pill.off { color: #7d8590; }
+    </style>
+  </head>
+  <body>
+    <h1>TinyGPT</h1>
+    <p class="sub">
+      Train a byte-level GPT from scratch — entirely in your browser, in a Web
+      Worker, on WebAssembly. The UI thread stays responsive throughout.
+    </p>
+
+    <div class="card" style="margin-bottom: 20px">
+      <h2>Browser capabilities</h2>
+      <div id="caps">detecting…</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>1 · Training corpus</h2>
+        <textarea id="corpus">A small model learns one thing at a time. First it learns that letters follow letters. After a space, another word begins. After a period, a capital letter often comes next.
+Then it learns short words. The word "the" appears again and again, and so do "and", "of", "to", and "a". A model that predicts the next byte quickly learns to expect these common words, because guessing them lowers the loss on almost every line.
+Training is slow at the start and fast in the middle. At the start the model knows nothing, so its loss sits near the value of a uniform guess. In the middle the loss falls quickly as the model picks up the easy patterns. Near the end it falls slowly, because what remains is hard.
+The goal here is understanding, not a clever model. If you build it yourself, byte by byte and layer by layer, you will understand how every larger model works.</textarea>
+        <div style="display: flex; gap: 24px; flex-wrap: wrap; margin-top: 12px">
+          <div>
+            <label>context length <input id="ctx" type="number" value="64" min="16" max="128" /></label>
+            <label>layers <input id="layers" type="number" value="3" min="1" max="6" /></label>
+            <label>d_model
+              <select id="dModel">
+                <option value="48">48</option>
+                <option value="96" selected>96</option>
+                <option value="144">144</option>
+              </select>
+            </label>
+          </div>
+          <div>
+            <label>max steps <input id="maxSteps" type="number" value="1500" min="50" max="20000" step="50" /></label>
+            <label>learning rate <input id="lr" type="number" value="0.003" min="0.0001" max="0.02" step="0.0001" /></label>
+            <label>batch size <input id="batch" type="number" value="16" min="1" max="64" /></label>
+          </div>
+        </div>
+        <div class="controls">
+          <button id="start">Start training</button>
+          <button id="pause" class="secondary" disabled>Pause</button>
+          <button id="stop" class="secondary" disabled>Stop</button>
+        </div>
+        <div id="status"></div>
+      </div>
+
+      <div class="card">
+        <h2>2 · Loss</h2>
+        <canvas id="chart" width="560" height="220"></canvas>
+        <div class="stats">
+          <span>step <b id="stStep">0</b></span>
+          <span>train <b id="stTrain">–</b></span>
+          <span>val <b id="stVal">–</b></span>
+          <span><b id="stToks">0</b> tok/s</span>
+          <span>backend <b id="stBackend">wasm</b></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 20px">
+      <h2>3 · Sample from the model</h2>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
+        <input id="prompt" type="text" value="The model " style="width: 240px" />
+        <label style="margin: 0">temperature
+          <input id="temp" type="number" value="0.8" min="0" max="2" step="0.1" /></label>
+        <label style="margin: 0">tokens
+          <input id="genTokens" type="number" value="160" min="16" max="512" /></label>
+        <button id="sample" class="secondary" disabled>Generate</button>
+      </div>
+      <div id="output">Train a model, then generate text from it here.</div>
+    </div>
+
+    <div class="card" style="margin-top: 20px">
+      <h2>4 · WebGPU matmul benchmark</h2>
+      <p style="margin: 0 0 10px; color: #7d8590; font-size: 12px">
+        Runs the same matrix multiply on the WebGPU compute kernel and on the
+        WASM kernel, checks they agree, and reports the speed-up. WebGPU-capable
+        browser required (Chrome / Edge 113+).
+      </p>
+      <button id="bench" class="secondary">Run benchmark</button>
+      <div id="benchOut">Not run yet.</div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

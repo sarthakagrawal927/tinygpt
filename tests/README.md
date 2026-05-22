@@ -3,6 +3,16 @@
 Do not skip these. They are the difference between a model that works and a
 model that looks like it works.
 
+Runnable suites (plain `python`, no pytest needed — pytest also works):
+
+```
+python tests/test_phase1.py        # Phase 1: tokenizer, shapes, loss, overfit, gradcheck
+python tests/test_lora.py          # Phase 3: adapter step-0, frozen grads, roundtrip
+bash   wasm/build_native.sh        # Phase 4: C++ kernels (finite-diff) + model overfit gate
+node   tests/smoke_wasm_node.mjs   # Phase 4: the compiled WASM module trains, from Node
+cd browser && npm run e2e          # Phase 4: headless-browser end-to-end (build+preview first)
+```
+
 | Test                | Purpose                                      |
 | ------------------- | -------------------------------------------- |
 | Tokenizer roundtrip | bytes → text → bytes is lossless             |

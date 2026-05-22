@@ -29,13 +29,67 @@ browser/platform-dependent and HTTPS-only, so the browser build needs a WASM fal
 
 ## Status
 
-Scaffold only. Every code file under `python_ref/`, `browser/`, `wasm/`, and
-`webgpu/` is a **documented stub** — a header describing its role, interface, and
-the doc section that specifies it. No runnable code yet.
+**All nine implementation milestones are done and verified.** Phases 1–5 — the
+Python reference, LoRA, the WASM backend, the browser training app, and the
+WebGPU kernel — all work end-to-end:
 
-Recommended next step: implement `python_ref/` (Phase 1) following `docs/model_guide.md`.
+- `python_ref/` — runnable PyTorch reference (`model`, `dataset`, `train`,
+  `sample`, `checkpoint`, `lora`, `evaluate`).
+- `wasm/src/` — five C++ kernels + a full C++ TinyGPT, all hand-written
+  forward+backward, compiled to WebAssembly with Emscripten.
+- `webgpu/` — a WGSL matmul compute kernel, bit-exact vs WASM and ~1.9× faster.
+- `browser/` — a Vite app that trains a byte-level GPT from scratch in a Web
+  Worker, with a live loss chart, OPFS checkpointing, and a WebGPU benchmark;
+  the UI never freezes.
 
-Progress tracker: [`MILESTONES.md`](MILESTONES.md) — 10 project milestones, 0/10 done.
+Verified: `tests/` 14/14 Python + 18/18 C++ kernel checks + the C++ model
+overfit/checkpoint gates; the compiled module trains from Node; a
+headless-browser e2e trains to completion (loss 5.5 → 0.017), runs the WebGPU
+benchmark, and confirms the model survives a page refresh.
+
+The full write-up of what each component does and what each experiment showed
+is in [`docs/notes.md`](docs/notes.md).
+
+Progress tracker: [`MILESTONES.md`](MILESTONES.md) — 9/10 milestones done.
+Interactive-feature backlog: [`docs/feature_ideas.md`](docs/feature_ideas.md).
+
+## Running the Python reference
+
+```bash
+python -m venv python_ref/.venv && source python_ref/.venv/bin/activate
+pip install -r python_ref/requirements.txt
+
+# Phase 1 — train a tiny model from scratch
+python tests/test_phase1.py                                   # correctness gate
+python python_ref/train.py --data data/examples/tiny-corpus.txt --out checkpoints/base
+python python_ref/sample.py --checkpoint checkpoints/base --prompt "A small model "
+python python_ref/train.py --overfit                          # built-in smoke run
+
+# Phase 3 — LoRA fine-tune a frozen base onto a different corpus
+python tests/test_lora.py                                     # LoRA correctness
+python python_ref/lora.py --base checkpoints/base --data data/examples/tiny-corpus-2.txt \
+    --out checkpoints/adapter
+python python_ref/lora.py --base checkpoints/base --adapter checkpoints/adapter \
+    --compare --prompt "The "
+
+# Milestone 4 — the base / few-shot / LoRA / LoRA+retrieval comparison matrix
+python python_ref/evaluate.py --base checkpoints/base --adapter checkpoints/adapter
+
+# Phase 4 — verify the WASM C++ kernels + model natively (needs only clang/g++)
+bash wasm/build_native.sh
+```
+
+## Running the browser app (Phase 4)
+
+```bash
+bash wasm/build_wasm.sh          # compile kernels+model to WASM (needs Emscripten)
+cd browser && npm install
+npm run dev                      # open the printed localhost URL, then "Start training"
+```
+
+`node tests/smoke_wasm_node.mjs` verifies the compiled WASM module from Node;
+`npm run e2e` (in `browser/`, after `npm run build` + `npm run preview`) drives
+the whole app in a headless browser.
 
 ## Layout
 
@@ -59,6 +113,8 @@ tinygpt/
 - `docs/learning_roadmap.md` — the 9-phase + 12-week learning curriculum
 - `docs/browser_notes.md` — WASM, Web Workers, OPFS, WebGPU specifics (Phase 4–5)
 - `docs/evaluation.md` — required tests, evaluation matrix, memorization checks
+- `docs/feature_ideas.md` — interactive-learning feature backlog (from 5k+ star repos)
+- `docs/notes.md` — learning write-up: every component and what each experiment showed
 
 The learning curriculum is also mirrored into the `swe-interview-prep` fleet project
 (`docs/TINYGPT_LEARNING_PATH.md`) as 19 `ml-*` FSRS-tracked concepts.

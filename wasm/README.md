@@ -31,6 +31,20 @@ emcc src/*.cpp -O3 -msimd128 -s MODULARIZE=1 -s EXPORT_ES6=1 -s ALLOW_MEMORY_GRO
   -o dist/tinygpt.simd.js
 ```
 
+## Native verification (no Emscripten needed)
+
+The kernels are plain C++ — compile them with the host compiler and run the
+finite-difference gradient checks before ever touching Emscripten:
+
+```bash
+bash wasm/build_native.sh        # clang++ build + tests/test_wasm_kernels.cpp
+```
+
+Each kernel's hand-written backward is checked against a numerical gradient;
+18/18 checks currently pass.
+
 ## Status
 
-Documented stubs only. Requires the Emscripten SDK. See `../docs/browser_notes.md`.
+All five kernels are **implemented and natively verified**. The Emscripten build
+(`emcc` → `dist/tinygpt.js`) and the Web Worker wiring are the remaining
+milestone-5 work; they require the Emscripten SDK. See `../docs/browser_notes.md`.
