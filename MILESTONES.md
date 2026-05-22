@@ -55,9 +55,14 @@ Interactive-feature backlog: `docs/feature_ideas.md`.
   _Done: `docs/notes.md` — a component-by-component tour with the concrete
   result that verified each one._
 - [ ] **10. Public repo with experiments** — flip this repo to public with an
-  experiments log once the milestones above are stable. (Currently private.)
+  experiments log once the milestones above are stable.
+  _Milestones 1–9 are merged to `main`; `docs/notes.md` is the experiments
+  write-up. The repo is kept private for now — flip it with
+  `gh repo edit --visibility public` when ready._
 
 ## Progress
 
-**9 / 10 complete** — milestones 1–9 are all done and verified end-to-end.
-The only thing left is milestone 10: pushing and flipping the repo to public.
+**9 / 10 complete** — milestones 1–9 are done and verified end-to-end and
+merged to `main`. Milestone 10 is intentionally deferred: the experiments
+write-up (`docs/notes.md`) is ready; the repo stays private until you choose to
+make it public.
