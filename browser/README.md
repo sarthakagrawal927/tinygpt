@@ -35,7 +35,7 @@ Training must never run on the main thread — the UI has to stay responsive.
 | `src/tokenizer.ts`    | Byte-level encode/decode (vocab 256) |
 | `src/charts.ts`       | Canvas loss chart |
 | `src/storage.ts`      | OPFS persistence |
-| `src/runtime_detect.ts` | Backend capability detection |
+| `src/runtime_detect.ts` | Backend + hardware detection; recommends a model size |
 | `src/types.ts`        | main ⇆ worker message protocol |
 
 ## Run it

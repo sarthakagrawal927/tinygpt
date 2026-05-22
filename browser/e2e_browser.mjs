@@ -36,6 +36,12 @@ page.on("console", (m) => {
 await page.goto(BASE, { waitUntil: "load" });
 check("page loaded", true, BASE);
 
+// Machine detection + model recommendation.
+const caps = (await page.textContent("#caps")) || "";
+check("machine detection + recommendation shown",
+  /Your machine:/.test(caps) && /Suggested model:/.test(caps),
+  caps.replace(/\s+/g, " ").trim().slice(0, 88));
+
 // Keep the run short so the e2e is quick.
 await page.fill("#maxSteps", "400");
 await page.fill("#corpus", "the quick brown fox jumps over the lazy dog. ".repeat(60));
@@ -118,6 +124,14 @@ await page.waitForFunction(
 );
 check("restored model still generates", ((await page.textContent("#output")) || "").length > 10,
   "ok");
+
+// The "Apply" button fills the config inputs with the recommended model.
+await page.click("#applyRec");
+const ctxAfter = await page.inputValue("#ctx");
+const layersAfter = await page.inputValue("#layers");
+check("Apply sets a recommended config",
+  /^\d+$/.test(ctxAfter) && /^\d+$/.test(layersAfter),
+  `ctx=${ctxAfter} layers=${layersAfter}`);
 
 check("no console / page errors", errors.length === 0, errors.join(" | ") || "none");
 

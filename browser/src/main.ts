@@ -11,7 +11,12 @@
 import { benchmarkMatmul, initWebGPU } from "../../webgpu/kernels";
 import { TinyGptBackend } from "./backend";
 import { LossChart } from "./charts";
-import { detectCapabilities } from "./runtime_detect";
+import {
+  detectCapabilities,
+  detectHardware,
+  recommendModel,
+  type ModelRecommendation,
+} from "./runtime_detect";
 import { loadRun, loadState, requestDurableStorage, saveRun, saveState } from "./storage";
 import { DEFAULT_CONFIG, type FromWorker, type RunConfig, type ToWorker } from "./types";
 
@@ -74,6 +79,19 @@ function setRunning(on: boolean): void {
   els.start.disabled = on;
   els.pause.disabled = !on;
   els.stop.disabled = !on;
+}
+
+// --- hardware-aware recommendation ----------------------------------------
+function formatParams(n: number): string {
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`;
+}
+
+/** Fill the config inputs with a recommended model for the detected machine. */
+function applyRecommendation(rec: ModelRecommendation): void {
+  byId<HTMLInputElement>("ctx").value = String(rec.ctx);
+  byId<HTMLInputElement>("layers").value = String(rec.layers);
+  byId<HTMLSelectElement>("dModel").value = String(rec.dModel);
+  byId<HTMLInputElement>("maxSteps").value = String(rec.maxSteps);
 }
 
 // --- controls -------------------------------------------------------------
@@ -200,14 +218,35 @@ worker.onerror = (e) => {
 async function init(): Promise<void> {
   const caps = await detectCapabilities();
   const storage = await requestDurableStorage();
+  const hw = detectHardware();
+  const rec = recommendModel(hw);
   const pill = (label: string, on: boolean) =>
     `<span class="pill ${on ? "on" : "off"}">${label} ${on ? "✓" : "—"}</span>`;
+
   els.caps.innerHTML =
+    `<div>` +
     pill("WebGPU", caps.webgpu) +
     pill("WASM SIMD", caps.wasmSimd) +
     pill("cross-origin isolated", caps.crossOriginIsolated) +
-    `<span class="pill on">training backend: ${caps.active}</span>` +
-    `<span class="pill off">OPFS quota ~${storage.quotaMB} MB</span>`;
+    `<span class="pill on">backend: ${caps.active}</span>` +
+    `<span class="pill off">OPFS ~${storage.quotaMB} MB</span>` +
+    `</div>` +
+    `<div style="margin-top:10px;font-size:13px;color:#adbac7">` +
+    `<b style="color:#e6edf3">Your machine:</b> ${hw.cores} logical cores` +
+    (hw.deviceMemoryGB ? ` · ~${hw.deviceMemoryGB} GB RAM` : "") +
+    ` · CPU probe ${hw.cpuProbeMs.toFixed(0)} ms` +
+    `</div>` +
+    `<div style="margin-top:6px;font-size:13px;color:#adbac7">` +
+    `<b style="color:#e6edf3">Suggested model:</b> ~${formatParams(rec.approxParams)} params ` +
+    `— context ${rec.ctx}, ${rec.layers} layers, d_model ${rec.dModel} ` +
+    `<span style="color:#7d8590">(${rec.tier} machine — ${rec.note})</span> ` +
+    `<button id="applyRec" class="secondary" style="padding:3px 10px;margin-left:4px">Apply</button>` +
+    `</div>`;
+
+  byId<HTMLButtonElement>("applyRec").addEventListener("click", () => {
+    applyRecommendation(rec);
+    byId<HTMLButtonElement>("applyRec").textContent = "Applied ✓";
+  });
 
   // Restore the previous run — the loss chart and the trained model — so it
   // survives a page refresh (milestone 7).
