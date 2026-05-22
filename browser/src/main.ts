@@ -13,6 +13,7 @@ import { TinyGptBackend } from "./backend";
 import { HF_CATALOG, fetchHfText } from "./datasets";
 import { LossChart } from "./charts";
 import {
+  detectBrowser,
   detectCapabilities,
   detectHardware,
   recommendModel,
@@ -274,6 +275,7 @@ async function init(): Promise<void> {
   const storage = await requestDurableStorage();
   const hw = detectHardware();
   const rec = recommendModel(hw);
+  const browser = detectBrowser();
   const pill = (label: string, on: boolean) =>
     `<span class="pill ${on ? "on" : "off"}">${label} ${on ? "✓" : "—"}</span>`;
 
@@ -286,6 +288,9 @@ async function init(): Promise<void> {
     `<span class="pill off">OPFS ~${storage.quotaMB} MB</span>` +
     `</div>` +
     `<div style="margin-top:10px;font-size:13px;color:#adbac7">` +
+    `<b style="color:#e6edf3">Browser:</b> ${browser.name} — ${browser.note}` +
+    `</div>` +
+    `<div style="margin-top:6px;font-size:13px;color:#adbac7">` +
     `<b style="color:#e6edf3">Your machine:</b> ${hw.cores} logical cores` +
     (hw.deviceMemoryGB ? ` · ~${hw.deviceMemoryGB} GB RAM` : "") +
     ` · CPU probe ${hw.cpuProbeMs.toFixed(0)} ms` +

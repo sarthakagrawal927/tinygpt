@@ -126,17 +126,20 @@ export function detectHardware(): Hardware {
   };
 }
 
-// Per-tier model configs — sized so a run finishes while the user watches.
-// d_model values are multiples of 3 (the app uses 3 attention heads).
+// Per-tier model configs. d_model values are multiples of 3 (the app uses 3
+// attention heads). maxSteps shrinks as the model grows, because in-browser
+// training is single-threaded WASM and genuinely slow: measured on a fast
+// laptop, a 0.36M model is ~0.4s/step and a 1.3M model is ~2.6s/step. The notes
+// stay vague on time on purpose — the live ETA in the stats is the real number.
 const TIERS: Record<MachineTier, Omit<ModelRecommendation, "tier" | "approxParams">> = {
-  modest: { ctx: 32, layers: 2, dModel: 48, maxSteps: 2000,
-    note: "overfits a tiny corpus in seconds" },
-  standard: { ctx: 64, layers: 3, dModel: 96, maxSteps: 1500,
-    note: "a real run in well under a minute" },
-  capable: { ctx: 96, layers: 4, dModel: 96, maxSteps: 1200,
-    note: "a real run in about a minute" },
-  strong: { ctx: 128, layers: 5, dModel: 144, maxSteps: 800,
-    note: "a ~1.3M-param run in a couple of minutes" },
+  modest: { ctx: 32, layers: 2, dModel: 48, maxSteps: 1500,
+    note: "tiny and quick — the loss curve falls within a few minutes" },
+  standard: { ctx: 64, layers: 3, dModel: 96, maxSteps: 600,
+    note: "a small model; a full run is several minutes — watch the ETA" },
+  capable: { ctx: 96, layers: 4, dModel: 96, maxSteps: 400,
+    note: "slower per step; a run takes a good few minutes" },
+  strong: { ctx: 128, layers: 4, dModel: 144, maxSteps: 200,
+    note: "near the in-browser ceiling and slow — for real runs, train locally" },
 };
 
 /** Rough parameter count: embeddings + ~12·d² per transformer layer. */
@@ -157,4 +160,40 @@ export function recommendModel(hw: Hardware): ModelRecommendation {
 
   const t = TIERS[tier];
   return { tier, ...t, approxParams: estimateParams(t.ctx, t.layers, t.dModel) };
+}
+
+// ===========================================================================
+// Browser detection — what differs across Chromium / Safari / Firefox
+// ===========================================================================
+
+export interface BrowserInfo {
+  name: string;
+  chromium: boolean;
+  note: string; // what running this app in this browser changes
+}
+
+/**
+ * Identify the browser and explain what it changes here. Training itself is
+ * WebAssembly — identical in every modern browser; only the extras (WebGPU
+ * acceleration, the RAM hint, OPFS checkpoint storage) vary.
+ */
+export function detectBrowser(): BrowserInfo {
+  const ua = navigator.userAgent;
+  const chromiumNote =
+    "all features available — WebGPU, the RAM hint, and OPFS checkpointing.";
+  const nonChromium = (webgpu: string) =>
+    "training (WebAssembly) is identical here; the RAM hint is Chromium-only, " +
+    `so the model suggestion uses the CPU-speed probe instead, and ${webgpu}`;
+
+  if (/\bEdg\//.test(ua)) return { name: "Edge", chromium: true, note: chromiumNote };
+  if (/\bOPR\//.test(ua)) return { name: "Opera", chromium: true, note: chromiumNote };
+  if (/\bFirefox\//.test(ua))
+    return { name: "Firefox", chromium: false,
+      note: nonChromium("WebGPU is still rolling out.") };
+  if (/\bChrome\//.test(ua)) return { name: "Chrome", chromium: true, note: chromiumNote };
+  if (/\bSafari\//.test(ua))
+    return { name: "Safari", chromium: false,
+      note: nonChromium("WebGPU needs Safari 18+ and OPFS needs Safari 17+.") };
+  return { name: "this browser", chromium: false,
+    note: "training runs on WebAssembly, which every modern browser supports." };
 }

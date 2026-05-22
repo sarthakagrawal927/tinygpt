@@ -36,10 +36,10 @@ page.on("console", (m) => {
 await page.goto(BASE, { waitUntil: "load" });
 check("page loaded", true, BASE);
 
-// Machine detection + model recommendation.
+// Browser + machine detection + model recommendation.
 const caps = (await page.textContent("#caps")) || "";
-check("machine detection + recommendation shown",
-  /Your machine:/.test(caps) && /Suggested model:/.test(caps),
+check("browser + machine detection shown",
+  /Browser:/.test(caps) && /Your machine:/.test(caps) && /Suggested model:/.test(caps),
   caps.replace(/\s+/g, " ").trim().slice(0, 88));
 
 // Hugging Face dataset catalog is populated (no network needed).
