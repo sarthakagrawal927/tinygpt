@@ -76,13 +76,25 @@ stages (`webgpu/`):
 the project's overfit gate run on the GPU (loss 5.55 → 0.002 in 150 steps), and
 a headless-browser e2e that trains on the WebGPU backend.
 
-**Speed is not there yet, and this is the honest part.** The implementation is
-naive about memory: every step allocates fresh GPU buffers for every activation
-and gradient and frees them at the end of the step (the `keep` / `freeScratch`
-pattern in `gpu_model.ts`), and it downloads the loss every step, which forces a
-full GPU sync. That per-step buffer churn dominates — for the model sizes here,
-WebGPU training is currently *not* faster than the WASM path. The kernels are
-fast; the orchestration is what's slow.
+**Speed is not there yet, and this is the honest part.** Measured in headless
+Chromium, the same config trained on each backend:
+
+| Model | WASM (SIMD) | WebGPU      | WebGPU vs WASM |
+| ----- | ----------- | ----------- | -------------- |
+| 0.07M | 24,858 tok/s | 11,005 tok/s | 0.45× (slower) |
+| 0.36M |  4,769 tok/s |  2,691 tok/s | 0.58× (slower) |
+
+WebGPU training is currently **~2× slower** than the WASM path, not faster. The
+implementation is naive about memory: every step allocates fresh GPU buffers for
+every activation and gradient and frees them at the end of the step (the `keep`
+/ `freeScratch` pattern in `gpu_model.ts`), and it downloads the loss every
+step, which forces a full GPU sync. That per-step buffer churn dominates — the
+kernels are fast, the orchestration is what's slow.
+
+One encouraging sign: WebGPU's relative speed *improves* with model size
+(0.45× → 0.58×), because larger tensors mean more compute per dispatch to
+amortize the fixed overhead against. The crossover — where the GPU's
+parallelism finally wins — is past these sizes.
 
 The optimization that unlocks the real speed-up: a **buffer pool** — allocate
 the activation/gradient buffers once for a given batch shape and reuse them
