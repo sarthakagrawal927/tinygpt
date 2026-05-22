@@ -1,10 +1,12 @@
 /**
  * ops.ts — WebGPU compute kernels for training (Phase 5).
  *
- * Stage 1: matmul forward and backward. `GpuOps` compiles the pipelines from
- * train.wgsl once; each call dispatches a kernel over GpuTensors that stay
- * resident on the GPU. Later stages add layernorm, attention, the optimizer,
- * and a TS orchestrator that wires them into a training loop.
+ * One shader module (train.wgsl), one bind-group layout (six storage buffers +
+ * a params uniform). Each method allocates its output GpuTensors, fills the
+ * params, and dispatches — adding a kernel never touches the plumbing.
+ *
+ * Stages 1-2: matmul fwd/bwd, the elementwise ops, GELU, and layernorm.
+ * Later: attention, the optimizer, and a training orchestrator.
  *
  * Guide: docs/performance.md ("WebGPU — the real ceiling")
  */
@@ -12,86 +14,196 @@
 import shader from "./train.wgsl?raw";
 import { GpuTensor, type GpuContext } from "./tensor";
 
+const ENTRIES = [
+  "matmul", "matmul_abt", "matmul_atb", "add", "bias_add", "bias_grad",
+  "gelu_forward", "gelu_backward", "layernorm_forward", "layernorm_dx",
+  "layernorm_dgb",
+] as const;
+type Entry = (typeof ENTRIES)[number];
+
+/** Params uniform: up to four u32 (dims) and four f32 (eps, scale, ...). */
+interface Params {
+  a?: number; b?: number; c?: number; d?: number;
+  fa?: number; fb?: number; fc?: number; fd?: number;
+}
+
 export class GpuOps {
   private constructor(
     private readonly device: GPUDevice,
-    private readonly pipelines: Record<string, GPUComputePipeline>,
+    private readonly layout: GPUBindGroupLayout,
+    private readonly pipelines: Record<Entry, GPUComputePipeline>,
+    // One distinct dummy per slot — WebGPU forbids binding the same buffer to
+    // two writable-storage bindings in a bind group (aliasing).
+    private readonly dummies: GPUBuffer[],
   ) {}
 
   static create(ctx: GpuContext): GpuOps {
-    const module = ctx.device.createShaderModule({ code: shader });
-    const make = (entryPoint: string) =>
-      ctx.device.createComputePipeline({
-        layout: "auto",
-        compute: { module, entryPoint },
-      });
-    return new GpuOps(ctx.device, {
-      matmul: make("matmul"),
-      matmul_abt: make("matmul_abt"),
-      matmul_atb: make("matmul_atb"),
-    });
-  }
+    const device = ctx.device;
+    const module = device.createShaderModule({ code: shader });
 
-  /** Dispatch one matmul-family kernel. `dims` is (M, K, N); the output C is
-   *  [M, N] and one invocation computes one element. */
-  private dispatch(
-    pipeline: GPUComputePipeline,
-    a: GpuTensor,
-    b: GpuTensor,
-    c: GpuTensor,
-    M: number,
-    K: number,
-    N: number,
-  ): void {
-    const dims = this.device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    const storage = (binding: number): GPUBindGroupLayoutEntry => ({
+      binding,
+      visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: "storage" },
     });
-    this.device.queue.writeBuffer(dims, 0, new Uint32Array([M, K, N, 0]));
-    const bind = this.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+    const layout = device.createBindGroupLayout({
       entries: [
-        { binding: 0, resource: { buffer: a.buffer } },
-        { binding: 1, resource: { buffer: b.buffer } },
-        { binding: 2, resource: { buffer: c.buffer } },
-        { binding: 3, resource: { buffer: dims } },
+        storage(0), storage(1), storage(2), storage(3), storage(4), storage(5),
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ],
     });
-    const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bind);
-    pass.dispatchWorkgroups(Math.ceil(M / 16), Math.ceil(N / 16));
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
-    dims.destroy();
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+
+    const pipelines = {} as Record<Entry, GPUComputePipeline>;
+    for (const entryPoint of ENTRIES) {
+      pipelines[entryPoint] = device.createComputePipeline({
+        layout: pipelineLayout,
+        compute: { module, entryPoint },
+      });
+    }
+    // A distinct 1-element buffer for each slot a kernel leaves unused.
+    const dummies: GPUBuffer[] = [];
+    for (let i = 0; i < 6; i++) {
+      dummies.push(device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE }));
+    }
+    return new GpuOps(device, layout, pipelines, dummies);
   }
 
-  /** C = A @ B.   A:[M,K]  B:[K,N]  ->  C:[M,N] */
+  private newTensor(size: number, label: string): GpuTensor {
+    return new GpuTensor(this.device, size, label);
+  }
+
+  /** Dispatch one kernel. `buffers` fill g0..g5 in order; unused slots get a
+   *  dummy. `wgX`/`wgY` are workgroup counts. */
+  private dispatch(
+    entry: Entry,
+    buffers: GpuTensor[],
+    params: Params,
+    wgX: number,
+    wgY = 1,
+  ): void {
+    const u = new ArrayBuffer(32);
+    const dv = new DataView(u);
+    dv.setUint32(0, params.a ?? 0, true);
+    dv.setUint32(4, params.b ?? 0, true);
+    dv.setUint32(8, params.c ?? 0, true);
+    dv.setUint32(12, params.d ?? 0, true);
+    dv.setFloat32(16, params.fa ?? 0, true);
+    dv.setFloat32(20, params.fb ?? 0, true);
+    dv.setFloat32(24, params.fc ?? 0, true);
+    dv.setFloat32(28, params.fd ?? 0, true);
+    const pbuf = this.device.createBuffer({
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(pbuf, 0, u);
+
+    const entries: GPUBindGroupEntry[] = [];
+    for (let i = 0; i < 6; i++) {
+      entries.push({
+        binding: i,
+        resource: {
+          buffer: i < buffers.length ? buffers[i].buffer : this.dummies[i],
+        },
+      });
+    }
+    entries.push({ binding: 6, resource: { buffer: pbuf } });
+    const bind = this.device.createBindGroup({ layout: this.layout, entries });
+
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipelines[entry]);
+    pass.setBindGroup(0, bind);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
+    pbuf.destroy();
+  }
+
+  // --- matmul --------------------------------------------------------------
+  /** C = A @ B.   A:[M,K]  B:[K,N]  ->  [M,N] */
   matmul(a: GpuTensor, b: GpuTensor, M: number, K: number, N: number): GpuTensor {
-    const c = new GpuTensor(this.device, M * N, "matmul.C");
-    this.dispatch(this.pipelines.matmul, a, b, c, M, K, N);
+    const c = this.newTensor(M * N, "matmul.C");
+    this.dispatch("matmul", [a, b, c], { a: M, b: K, c: N },
+      Math.ceil(M / 16), Math.ceil(N / 16));
     return c;
   }
 
-  /**
-   * Backward of C = A @ B. Given dC:[M,N], returns
-   *   dA = dC @ Bᵀ : [M,K]      dB = Aᵀ @ dC : [K,N]
-   */
+  /** Backward of C = A @ B:  dA = dC@Bᵀ [M,K],  dB = Aᵀ@dC [K,N]. */
   matmulBackward(
-    a: GpuTensor,
-    b: GpuTensor,
-    dC: GpuTensor,
-    M: number,
-    K: number,
-    N: number,
+    a: GpuTensor, b: GpuTensor, dC: GpuTensor, M: number, K: number, N: number,
   ): { dA: GpuTensor; dB: GpuTensor } {
-    // dA = dC @ Bᵀ : an "A times B-transposed" matmul, output [M,K].
-    const dA = new GpuTensor(this.device, M * K, "matmul.dA");
-    this.dispatch(this.pipelines.matmul_abt, dC, b, dA, M, N, K);
-    // dB = Aᵀ @ dC : an "A-transposed times B" matmul, output [K,N].
-    const dB = new GpuTensor(this.device, K * N, "matmul.dB");
-    this.dispatch(this.pipelines.matmul_atb, a, dC, dB, K, M, N);
+    const dA = this.newTensor(M * K, "matmul.dA");
+    this.dispatch("matmul_abt", [dC, b, dA], { a: M, b: N, c: K },
+      Math.ceil(M / 16), Math.ceil(K / 16));
+    const dB = this.newTensor(K * N, "matmul.dB");
+    this.dispatch("matmul_atb", [a, dC, dB], { a: K, b: M, c: N },
+      Math.ceil(K / 16), Math.ceil(N / 16));
     return { dA, dB };
+  }
+
+  // --- elementwise ---------------------------------------------------------
+  /** c = a + b, length n (residual add). */
+  add(a: GpuTensor, b: GpuTensor, n: number): GpuTensor {
+    const c = this.newTensor(n, "add");
+    this.dispatch("add", [a, b, c], { a: n }, Math.ceil(n / 64));
+    return c;
+  }
+
+  /** y += bias, broadcast over `rows` rows of width D. In place on y. */
+  biasAdd(y: GpuTensor, bias: GpuTensor, rows: number, D: number): void {
+    this.dispatch("bias_add", [y, bias], { a: rows, b: D },
+      Math.ceil((rows * D) / 64));
+  }
+
+  /** db[d] = sum over rows of dy[row,d]. */
+  biasGrad(dy: GpuTensor, rows: number, D: number): GpuTensor {
+    const db = this.newTensor(D, "db");
+    this.dispatch("bias_grad", [dy, db], { a: rows, b: D }, Math.ceil(D / 64));
+    return db;
+  }
+
+  /** y = GELU(x), length n. */
+  gelu(x: GpuTensor, n: number): GpuTensor {
+    const y = this.newTensor(n, "gelu");
+    this.dispatch("gelu_forward", [x, y], { a: n }, Math.ceil(n / 64));
+    return y;
+  }
+
+  /** dx = dy * GELU'(x), length n. */
+  geluBackward(x: GpuTensor, dy: GpuTensor, n: number): GpuTensor {
+    const dx = this.newTensor(n, "dgelu");
+    this.dispatch("gelu_backward", [x, dy, dx], { a: n }, Math.ceil(n / 64));
+    return dx;
+  }
+
+  // --- layernorm -----------------------------------------------------------
+  /** LayerNorm over the last dim D, for N rows. Returns y and the cached
+   *  mean/rstd the backward pass needs. */
+  layernormForward(
+    x: GpuTensor, gamma: GpuTensor, beta: GpuTensor, N: number, D: number,
+    eps = 1e-5,
+  ): { y: GpuTensor; mean: GpuTensor; rstd: GpuTensor } {
+    const y = this.newTensor(N * D, "ln.y");
+    const mean = this.newTensor(N, "ln.mean");
+    const rstd = this.newTensor(N, "ln.rstd");
+    this.dispatch("layernorm_forward", [x, gamma, beta, y, mean, rstd],
+      { a: N, b: D, fa: eps }, Math.ceil(N / 64));
+    return { y, mean, rstd };
+  }
+
+  /** LayerNorm backward: dx, plus dgamma/dbeta summed over rows. */
+  layernormBackward(
+    x: GpuTensor, gamma: GpuTensor, mean: GpuTensor, rstd: GpuTensor,
+    dy: GpuTensor, N: number, D: number,
+  ): { dx: GpuTensor; dgamma: GpuTensor; dbeta: GpuTensor } {
+    const dx = this.newTensor(N * D, "ln.dx");
+    this.dispatch("layernorm_dx", [x, gamma, mean, rstd, dy, dx],
+      { a: N, b: D }, Math.ceil(N / 64));
+    const dgamma = this.newTensor(D, "ln.dgamma");
+    const dbeta = this.newTensor(D, "ln.dbeta");
+    this.dispatch("layernorm_dgb", [x, mean, rstd, dy, dgamma, dbeta],
+      { a: N, b: D }, Math.ceil(D / 64));
+    return { dx, dgamma, dbeta };
   }
 }
