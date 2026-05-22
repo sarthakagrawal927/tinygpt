@@ -43,6 +43,14 @@ interface Layer {
   fcInW: Param; fcInB: Param; fcOutW: Param; fcOutB: Param;
 }
 
+/** Forward activations one block needs for its backward pass. */
+interface LayerCache {
+  blockIn: GpuTensor; ln1o: GpuTensor; m1: GpuTensor; r1s: GpuTensor;
+  q: GpuTensor; k: GpuTensor; v: GpuTensor; attn: GpuTensor; ctx: GpuTensor;
+  r1: GpuTensor; ln2o: GpuTensor; m2: GpuTensor; r2s: GpuTensor;
+  hpre: GpuTensor; hact: GpuTensor;
+}
+
 // Deterministic RNG (mulberry32) + Box-Muller, for reproducible weight init.
 function makeRng(seed: number): () => number {
   let s = seed >>> 0;
@@ -172,25 +180,14 @@ export class GpuModel {
     return dA;
   }
 
-  /** One training step: forward, cross-entropy, backward, AdamW. Returns loss. */
-  async trainStep(
-    ids: Float32Array, targets: Float32Array, batch: number, lr: number,
-  ): Promise<number> {
-    const { vocab: V, ctx: T, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
+  /** Forward pass. Returns logits and everything the backward pass needs. */
+  private forward(ids: Float32Array, batch: number, T: number) {
+    const { vocab: V, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
     const N = batch * T;
-    const grads = new Map<Param, GpuTensor>();
-
-    // --- forward -----------------------------------------------------------
     const idsT = this.keep(this.tensorFrom(ids, "ids"));
-    const x0 = this.keep(this.ops.embedForward(this.tokEmb.w, this.posEmb.w, idsT, N, C, T));
-
-    interface Cache {
-      blockIn: GpuTensor; ln1o: GpuTensor; m1: GpuTensor; r1s: GpuTensor;
-      q: GpuTensor; k: GpuTensor; v: GpuTensor; attn: GpuTensor; ctx: GpuTensor;
-      r1: GpuTensor; ln2o: GpuTensor; m2: GpuTensor; r2s: GpuTensor;
-      hpre: GpuTensor; hact: GpuTensor;
-    }
-    const caches: Cache[] = [];
+    const x0 = this.keep(
+      this.ops.embedForward(this.tokEmb.w, this.posEmb.w, idsT, N, C, T));
+    const caches: LayerCache[] = [];
     let x = x0;
     for (let l = 0; l < L; l++) {
       const ly = this.layers[l];
@@ -221,6 +218,59 @@ export class GpuModel {
     this.keep(lnf.y); this.keep(lnf.mean); this.keep(lnf.rstd);
     // tied head: logits[N,V] = lnf[N,C] @ tok_emb[V,C]ᵀ
     const logits = this.keep(this.ops.matmulAbt(lnf.y, this.tokEmb.w, N, C, V));
+    return { logits, caches, lastX: x, lnf, idsT, N };
+  }
+
+  /** Autoregressive generation from a prompt. temperature <= 0 is greedy. */
+  async generate(
+    promptIds: number[], maxNew: number, temperature: number, topK: number,
+    seed: number,
+  ): Promise<number[]> {
+    const { vocab: V, ctx } = this.cfg;
+    const ids = promptIds.length > 0 ? [...promptIds] : [10];
+    const rng = makeRng(seed);
+    for (let s = 0; s < maxNew; s++) {
+      const T = Math.min(ids.length, ctx);
+      const window = new Float32Array(ids.slice(ids.length - T));
+      const logits = await this.forward(window, 1, T).logits.download();
+      const base = (T - 1) * V;
+      let next = 0;
+      if (temperature <= 0) {
+        for (let v = 1; v < V; v++) if (logits[base + v] > logits[base + next]) next = v;
+      } else {
+        const probs = new Float32Array(V);
+        let mx = -1e30;
+        for (let v = 0; v < V; v++) mx = Math.max(mx, logits[base + v]);
+        for (let v = 0; v < V; v++) probs[v] = Math.exp((logits[base + v] - mx) / temperature);
+        if (topK > 0 && topK < V) {
+          const thresh = [...probs].sort((a, b) => b - a)[topK - 1];
+          for (let v = 0; v < V; v++) if (probs[v] < thresh) probs[v] = 0;
+        }
+        let sum = 0;
+        for (const z of probs) sum += z;
+        let r = rng() * sum;
+        next = V - 1;
+        for (let v = 0; v < V; v++) {
+          r -= probs[v];
+          if (r <= 0) { next = v; break; }
+        }
+      }
+      ids.push(next);
+      this.freeScratch();
+    }
+    return ids;
+  }
+
+  /** One training step: forward, cross-entropy, backward, AdamW. Returns loss. */
+  async trainStep(
+    ids: Float32Array, targets: Float32Array, batch: number, lr: number,
+  ): Promise<number> {
+    const { vocab: V, ctx: T, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
+    const grads = new Map<Param, GpuTensor>();
+
+    const f = this.forward(ids, batch, T);
+    const { logits, caches, lnf, idsT } = f;
+    const N = f.N;
 
     // --- loss + dlogits ----------------------------------------------------
     const targetsT = this.keep(this.tensorFrom(targets, "targets"));
@@ -228,12 +278,11 @@ export class GpuModel {
     this.keep(ce.dlogits); this.keep(ce.loss);
 
     // --- backward ----------------------------------------------------------
-    // head backward: logits = lnf @ tok_embᵀ
-    //   dlnf = dlogits @ tok_emb            [N,V]@[V,C] -> [N,C]
-    //   d(tok_emb) from head = dlogitsᵀ @ lnf   -> [V,C]
+    // head backward: dlnf = dlogits @ tok_emb; d(tok_emb)_head = dlogitsᵀ @ lnf
     const dlnf = this.keep(this.ops.matmul(ce.dlogits, this.tokEmb.w, N, V, C));
     const dTokHead = this.keep(this.ops.matmulAtb(ce.dlogits, lnf.y, V, N, C));
-    const lnfBack = this.ops.layernormBackward(x, this.lnfG.w, lnf.mean, lnf.rstd, dlnf, N, C);
+    const lnfBack = this.ops.layernormBackward(
+      f.lastX, this.lnfG.w, lnf.mean, lnf.rstd, dlnf, N, C);
     this.keep(lnfBack.dx); this.keep(lnfBack.dgamma); this.keep(lnfBack.dbeta);
     grads.set(this.lnfG, lnfBack.dgamma);
     grads.set(this.lnfB, lnfBack.dbeta);

@@ -21,6 +21,8 @@ export interface RunConfig {
   maxSteps: number;
   evalEvery: number;
   seed: number;
+  /** Which compute backend trains the model. */
+  backend: "wasm" | "webgpu";
 }
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -35,6 +37,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   maxSteps: 1500,
   evalEvery: 50,
   seed: 42,
+  backend: "wasm",
 };
 
 /** Posted to the UI on every eval interval — see docs/browser_notes.md. */

@@ -59,23 +59,33 @@ the same WebAssembly — the source language is not the bottleneck. Rewriting th
 kernels in Rust would be a large change for no speed-up. SIMD and threads are
 equally reachable from the current C++/Emscripten setup.
 
-## WebGPU — the real ceiling
+## WebGPU training
 
-Today WebGPU is used only for the standalone matmul benchmark; training runs
-entirely in WASM. Moving training onto the GPU is the change that would make a
-1M+ parameter model fast in the browser.
+The whole training loop now also runs on the GPU. It was built in six verified
+stages (`webgpu/`):
 
-The work, in the order `docs/browser_notes.md` lays out:
+1. GPU tensors + matmul forward/backward
+2. layernorm, GELU, the elementwise ops
+3. causal multi-head attention, forward and backward
+4. embeddings, cross-entropy, AdamW
+5. `gpu_model.ts` — the orchestrator: a full forward + backward + AdamW loop,
+   every tensor resident on the GPU
+6. wired into the app as a backend toggle (WASM / WebGPU)
 
-1. matmul (done — `webgpu/matmul.wgsl`)
-2. linear backward
-3. attention scores → softmax → value aggregation
-4. layernorm
-5. AdamW
+**Correctness** is solid: 24 kernel parity checks against plain-JS references,
+the project's overfit gate run on the GPU (loss 5.55 → 0.002 in 150 steps), and
+a headless-browser e2e that trains on the WebGPU backend.
 
-The thing that actually makes it fast is not porting the kernels but keeping
-the tensors resident in GPU buffers between ops — round-tripping every
-intermediate through JavaScript would erase the gain. On real GPU hardware the
-matmul-heavy parts run 10×+ faster than the WASM kernels; end-to-end the gain is
-smaller (the small elementwise ops have fixed dispatch overhead) but still
-large for the model sizes here.
+**Speed is not there yet, and this is the honest part.** The implementation is
+naive about memory: every step allocates fresh GPU buffers for every activation
+and gradient and frees them at the end of the step (the `keep` / `freeScratch`
+pattern in `gpu_model.ts`), and it downloads the loss every step, which forces a
+full GPU sync. That per-step buffer churn dominates — for the model sizes here,
+WebGPU training is currently *not* faster than the WASM path. The kernels are
+fast; the orchestration is what's slow.
+
+The optimization that unlocks the real speed-up: a **buffer pool** — allocate
+the activation/gradient buffers once for a given batch shape and reuse them
+across steps (exactly what `wasm/src/model.cpp` already does on the CPU side),
+and stop syncing every step. That is the clear next piece of work; the kernels
+and the orchestration are correct and in place for it.
