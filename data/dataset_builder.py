@@ -12,6 +12,11 @@ Two outputs:
 CLI:
     python data/dataset_builder.py tokens  <input.txt> [--out-dir data/examples]
     python data/dataset_builder.py jsonl   <examples.jsonl> [--out-dir data/examples]
+    python data/dataset_builder.py hf      <hf-dataset-id> [--config .. --rows ..]
+
+The `hf` command pulls plain text from a Hugging Face dataset via the public
+datasets-server HTTP API — no API key and no `datasets` dependency — so you can
+train on an open dataset instead of supplying your own file.
 
 Guide: docs/model_guide.md ("Dataset pipeline"), docs/lora_guide.md
 """
@@ -108,6 +113,53 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
+HF_ROWS_URL = "https://datasets-server.huggingface.co/rows"
+
+
+def build_from_hf(dataset: str, config: str, split: str, text_column: str,
+                  rows: int, out_dir: str | Path) -> Path:
+    """Pull text rows from a Hugging Face dataset into a plain-text file.
+
+    Uses the public datasets-server HTTP API — no API key, no `datasets`
+    dependency. The written file is ready for `train.py --data`.
+    """
+    import urllib.parse
+    import urllib.request
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    collected: list[str] = []
+    offset, page = 0, 100
+    while offset < rows:
+        n = min(page, rows - offset)
+        query = urllib.parse.urlencode(
+            {"dataset": dataset, "config": config, "split": split,
+             "offset": offset, "length": n})
+        with urllib.request.urlopen(f"{HF_ROWS_URL}?{query}", timeout=30) as resp:
+            payload = json.loads(resp.read())
+        batch = payload.get("rows", [])
+        if not batch:
+            break
+        for item in batch:
+            value = item.get("row", {}).get(text_column)
+            if isinstance(value, str) and value.strip():
+                collected.append(value.strip())
+        offset += len(batch)
+        if len(batch) < n:
+            break
+
+    if not collected:
+        raise SystemExit(f"no '{text_column}' text rows returned for {dataset}")
+
+    text = "\n\n".join(collected)
+    out_path = out_dir / f"{dataset.replace('/', '_')}.txt"
+    out_path.write_text(text)
+    print(f"hf      -> {out_path}  ({len(text):,} chars from {len(collected)} rows)")
+    print(f"         train: python python_ref/train.py --data {out_path}")
+    return out_path
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Build TinyGPT training data.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -121,11 +173,22 @@ def main(argv: list[str] | None = None) -> None:
     p_jsonl.add_argument("--out-dir", default="data/examples")
     p_jsonl.add_argument("--val-split", type=float, default=0.1)
 
+    p_hf = sub.add_parser("hf", help="pull a Hugging Face dataset into a text file")
+    p_hf.add_argument("dataset", help="HF dataset id, e.g. roneneldan/TinyStories")
+    p_hf.add_argument("--config", default="default")
+    p_hf.add_argument("--split", default="train")
+    p_hf.add_argument("--text-column", default="text")
+    p_hf.add_argument("--rows", type=int, default=2000, help="max rows to pull")
+    p_hf.add_argument("--out-dir", default="data/examples")
+
     args = parser.parse_args(argv)
     if args.cmd == "tokens":
         build_token_array(args.input, args.out_dir)
     elif args.cmd == "jsonl":
         build_jsonl(args.input, args.out_dir, args.val_split)
+    elif args.cmd == "hf":
+        build_from_hf(args.dataset, args.config, args.split, args.text_column,
+                      args.rows, args.out_dir)
 
 
 if __name__ == "__main__":

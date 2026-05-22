@@ -10,6 +10,7 @@
 
 import { benchmarkMatmul, initWebGPU } from "../../webgpu/kernels";
 import { TinyGptBackend } from "./backend";
+import { HF_CATALOG, fetchHfText } from "./datasets";
 import { LossChart } from "./charts";
 import {
   detectCapabilities,
@@ -40,6 +41,9 @@ const els = {
   stBackend: byId<HTMLElement>("stBackend"),
   bench: byId<HTMLButtonElement>("bench"),
   benchOut: byId<HTMLDivElement>("benchOut"),
+  hfDataset: byId<HTMLSelectElement>("hfDataset"),
+  hfLoad: byId<HTMLButtonElement>("hfLoad"),
+  hfStatus: byId<HTMLSpanElement>("hfStatus"),
 };
 
 const canvas = byId<HTMLCanvasElement>("chart");
@@ -170,6 +174,37 @@ els.bench.addEventListener("click", async () => {
     }`;
   } finally {
     els.bench.disabled = false;
+  }
+});
+
+// --- Hugging Face dataset picker ------------------------------------------
+for (const d of HF_CATALOG) {
+  const opt = document.createElement("option");
+  opt.value = d.id;
+  opt.textContent = `${d.label} — ${d.blurb}`;
+  els.hfDataset.appendChild(opt);
+}
+
+els.hfLoad.addEventListener("click", async () => {
+  const entry = HF_CATALOG.find((d) => d.id === els.hfDataset.value);
+  if (!entry) {
+    els.hfStatus.textContent = "pick a dataset from the list first";
+    return;
+  }
+  els.hfLoad.disabled = true;
+  els.hfStatus.textContent = `fetching ${entry.label}…`;
+  try {
+    const text = await fetchHfText(entry, 120_000, (chars) => {
+      els.hfStatus.textContent = `fetching ${entry.label}… ${Math.round(chars / 1000)} KB`;
+    });
+    els.corpus.value = text;
+    els.hfStatus.textContent =
+      `loaded ${Math.round(text.length / 1000)} KB from ${entry.label} · ${entry.license}`;
+  } catch (err) {
+    els.hfStatus.textContent =
+      `couldn't load: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    els.hfLoad.disabled = false;
   }
 });
 

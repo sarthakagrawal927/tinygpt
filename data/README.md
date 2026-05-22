@@ -58,3 +58,21 @@ For a real run, supply your own plain text via `--data your.txt` (Python) or the
 browser textarea: your own notes, public-domain books, a small codebase. See the
 source guidance at the top of this file for what makes good vs. bad training
 text.
+
+## Loading an open dataset from Hugging Face
+
+You don't have to supply the text yourself — both the browser app and the Python
+builder can pull an open dataset from the Hugging Face Hub through its public
+datasets-server API (no API key, CORS-enabled, so it works from a static site):
+
+- **Browser** — the playground's corpus card has a dataset picker (TinyStories,
+  Simple English Wikipedia, WikiText, English quotes). Pick one, click *Load*.
+- **Python** — `dataset_builder.py hf` writes a text file for `train.py --data`:
+
+  ```
+  python data/dataset_builder.py hf roneneldan/TinyStories --rows 2000
+  python python_ref/train.py --data data/examples/roneneldan_TinyStories.txt
+  ```
+
+`roneneldan/TinyStories` — simple, short stories — is the best fit for a tiny
+model. Each dataset keeps its own license; the browser app shows it.

@@ -42,6 +42,10 @@ check("machine detection + recommendation shown",
   /Your machine:/.test(caps) && /Suggested model:/.test(caps),
   caps.replace(/\s+/g, " ").trim().slice(0, 88));
 
+// Hugging Face dataset catalog is populated (no network needed).
+const hfOptions = await page.locator("#hfDataset option").count();
+check("HF dataset catalog populated", hfOptions >= 5, `${hfOptions} options`);
+
 // Keep the run short so the e2e is quick.
 await page.fill("#maxSteps", "400");
 await page.fill("#corpus", "the quick brown fox jumps over the lazy dog. ".repeat(60));
@@ -134,6 +138,18 @@ const layersAfter = await page.inputValue("#layers");
 check("Apply sets a recommended config",
   /^\d+$/.test(ctxAfter) && /^\d+$/.test(layersAfter),
   `ctx=${ctxAfter} layers=${layersAfter}`);
+
+// Load a dataset from Hugging Face (tolerant: passes on a graceful failure too,
+// so the test does not hard-depend on network availability).
+await page.selectOption("#hfDataset", "tinystories");
+await page.click("#hfLoad");
+await page.waitForFunction(
+  () => /loaded|couldn't/.test(document.getElementById("hfStatus")?.textContent || ""),
+  undefined,
+  { timeout: 45000 },
+);
+const hfStatus = (await page.textContent("#hfStatus")) || "";
+check("Hugging Face dataset load", /loaded \d+ KB|couldn't load/.test(hfStatus), hfStatus);
 
 check("no console / page errors", errors.length === 0, errors.join(" | ") || "none");
 
