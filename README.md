@@ -72,6 +72,10 @@ python tests/test_phase1.py                                   # correctness gate
 python python_ref/train.py --data data/examples/tiny-corpus.txt --out checkpoints/base
 python python_ref/sample.py --checkpoint checkpoints/base --prompt "A small model "
 python python_ref/train.py --overfit                          # built-in smoke run
+python python_ref/bench.py                                    # measure training speed by model size
+
+# Train a larger (~10.8M) model locally — too big for comfortable in-browser training
+python python_ref/train.py --model-config configs/model.small.json --data your-text.txt
 
 # Phase 3 — LoRA fine-tune a frozen base onto a different corpus
 python tests/test_lora.py                                     # LoRA correctness

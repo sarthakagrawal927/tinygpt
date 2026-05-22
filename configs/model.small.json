@@ -1,0 +1,19 @@
+{
+  "model_name": "byte-tinygpt-small",
+  "vocab_size": 256,
+  "context_length": 256,
+  "n_layers": 6,
+  "n_heads": 6,
+  "d_model": 384,
+  "d_mlp": 1536,
+  "dropout": 0.0,
+  "tie_embeddings": true,
+  "dtype": "float32",
+  "_notes": {
+    "expected_params": "~10.8M",
+    "purpose": "a larger model for LOCAL training — too big for comfortable in-browser (single-threaded WASM) training; fine on a laptop GPU/CPU",
+    "head_dim": "d_model / n_heads = 64",
+    "usage": "python python_ref/train.py --model-config configs/model.small.json --data <your-text>.txt",
+    "see_also": "python python_ref/bench.py — measure how fast this trains on your machine"
+  }
+}
