@@ -1,12 +1,15 @@
 /**
- * tensor.ts — GPU-resident float32 tensors for WebGPU training (Phase 5).
+ * tensor.ts — GPU-resident float32 tensors + a buffer pool (Phase 5).
  *
- * The point of training on the GPU is to keep every intermediate *on* the GPU
- * between ops — uploading and downloading each step would erase the speed-up.
- * `GpuTensor` wraps one storage buffer; the kernels in `ops.ts` read and write
- * these without round-tripping through JavaScript.
+ * Training reuses the same set of tensor shapes every step. Allocating fresh
+ * GPU buffers each step and destroying them is the dominant cost — so per-step
+ * ("scratch") tensors draw their buffers from a `BufferPool`: at the end of a
+ * step they are returned to the pool, and the next step reuses them. After the
+ * first step, a steady run does zero buffer allocation.
  *
- * Guide: docs/browser_notes.md ("WebGPU acceleration"), docs/performance.md
+ * Weights and optimizer moments are NOT pooled — they live for the whole run.
+ *
+ * Guide: docs/performance.md ("WebGPU training")
  */
 
 export interface GpuContext {
@@ -25,33 +28,60 @@ export async function createGpuContext(): Promise<GpuContext | null> {
   }
 }
 
-/** A flat float32 tensor living in a GPU storage buffer. */
-export class GpuTensor {
-  readonly buffer: GPUBuffer;
-  /** byte length, rounded up to a multiple of 4 and at least 4 */
-  private readonly bytes: number;
+/** Recycles storage buffers, keyed by byte size, so steps reuse them. */
+export class BufferPool {
+  private readonly free = new Map<number, GPUBuffer[]>();
 
-  constructor(
-    private readonly device: GPUDevice,
-    readonly size: number, // element count
-    label?: string,
-  ) {
-    this.bytes = Math.max(4, size * 4);
-    this.buffer = device.createBuffer({
-      label,
-      size: this.bytes,
+  constructor(private readonly device: GPUDevice) {}
+
+  acquire(bytes: number): GPUBuffer {
+    const list = this.free.get(bytes);
+    if (list && list.length > 0) return list.pop() as GPUBuffer;
+    return this.device.createBuffer({
+      size: bytes,
       usage:
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
   }
 
-  /** Copy host data into the tensor. */
+  release(buffer: GPUBuffer): void {
+    let list = this.free.get(buffer.size);
+    if (!list) {
+      list = [];
+      this.free.set(buffer.size, list);
+    }
+    list.push(buffer);
+  }
+}
+
+/** A flat float32 tensor living in a GPU storage buffer. */
+export class GpuTensor {
+  readonly buffer: GPUBuffer;
+  private readonly bytes: number;
+  private readonly pool: BufferPool | null;
+
+  constructor(
+    private readonly device: GPUDevice,
+    readonly size: number, // element count
+    opts?: { pool?: BufferPool; label?: string },
+  ) {
+    this.bytes = Math.max(4, size * 4);
+    this.pool = opts?.pool ?? null;
+    this.buffer = this.pool
+      ? this.pool.acquire(this.bytes)
+      : device.createBuffer({
+          label: opts?.label,
+          size: this.bytes,
+          usage:
+            GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+  }
+
   upload(data: Float32Array): void {
     this.device.queue.writeBuffer(this.buffer, 0, data as Float32Array<ArrayBuffer>);
   }
 
-  /** Read the tensor back to the host (via a staging buffer — STORAGE buffers
-   *  cannot be mapped directly). */
+  /** Read the tensor back to the host (via a staging buffer). */
   async download(): Promise<Float32Array> {
     const staging = this.device.createBuffer({
       size: this.bytes,
@@ -67,11 +97,17 @@ export class GpuTensor {
     return out;
   }
 
-  /** Convenience: allocate a tensor and fill it from host data. */
+  /** Allocate a (non-pooled) tensor and fill it — used for persistent weights. */
   static fromData(device: GPUDevice, data: Float32Array, label?: string): GpuTensor {
-    const t = new GpuTensor(device, data.length, label);
+    const t = new GpuTensor(device, data.length, { label });
     t.upload(data);
     return t;
+  }
+
+  /** Return the buffer to its pool (if pooled), else free it. */
+  recycle(): void {
+    if (this.pool) this.pool.release(this.buffer);
+    else this.buffer.destroy();
   }
 
   destroy(): void {
