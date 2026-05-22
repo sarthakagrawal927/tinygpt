@@ -77,6 +77,15 @@
     <div class="grid">
       <div class="card">
         <h2>1 · Training corpus</h2>
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px">
+          <select id="hfDataset">
+            <option value="">— your own text (below) —</option>
+          </select>
+          <button id="hfLoad" class="secondary" style="padding: 5px 12px">
+            Load from 🤗 Hugging Face
+          </button>
+          <span id="hfStatus" style="font-size: 12px; color: #7d8590"></span>
+        </div>
         <textarea id="corpus">A small model learns one thing at a time. First it learns that letters follow letters. After a space, another word begins. After a period, a capital letter often comes next.
 Then it learns short words. The word "the" appears again and again, and so do "and", "of", "to", and "a". A model that predicts the next byte quickly learns to expect these common words, because guessing them lowers the loss on almost every line.
 Training is slow at the start and fast in the middle. At the start the model knows nothing, so its loss sits near the value of a uniform guess. In the middle the loss falls quickly as the model picks up the easy patterns. Near the end it falls slowly, because what remains is hard.
