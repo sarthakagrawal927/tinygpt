@@ -88,8 +88,9 @@ export class GpuModel {
     return t;
   }
 
-  private tensorFrom(data: Float32Array, label: string): GpuTensor {
-    return GpuTensor.fromData(this.device, data, label);
+  // Per-step input tensors (ids, targets) are pooled — recycled each step.
+  private tensorFrom(data: Float32Array): GpuTensor {
+    return this.ops.upload(data);
   }
 
   private makeParam(size: number, fill: Float32Array, decay: boolean): Param {
@@ -184,7 +185,7 @@ export class GpuModel {
   private forward(ids: Float32Array, batch: number, T: number) {
     const { vocab: V, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
     const N = batch * T;
-    const idsT = this.keep(this.tensorFrom(ids, "ids"));
+    const idsT = this.keep(this.tensorFrom(ids));
     const x0 = this.keep(
       this.ops.embedForward(this.tokEmb.w, this.posEmb.w, idsT, N, C, T));
     const caches: LayerCache[] = [];
@@ -232,7 +233,10 @@ export class GpuModel {
     for (let s = 0; s < maxNew; s++) {
       const T = Math.min(ids.length, ctx);
       const window = new Float32Array(ids.slice(ids.length - T));
-      const logits = await this.forward(window, 1, T).logits.download();
+      this.ops.beginBatch();
+      const fwd = this.forward(window, 1, T);
+      this.ops.endBatch();
+      const logits = await fwd.logits.download();
       const base = (T - 1) * V;
       let next = 0;
       if (temperature <= 0) {
@@ -268,12 +272,14 @@ export class GpuModel {
     const { vocab: V, ctx: T, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
     const grads = new Map<Param, GpuTensor>();
 
+    // Record the whole step (forward + backward + AdamW) into one submission.
+    this.ops.beginBatch();
     const f = this.forward(ids, batch, T);
     const { logits, caches, lnf, idsT } = f;
     const N = f.N;
 
     // --- loss + dlogits ----------------------------------------------------
-    const targetsT = this.keep(this.tensorFrom(targets, "targets"));
+    const targetsT = this.keep(this.tensorFrom(targets));
     const ce = this.ops.crossEntropy(logits, targetsT, N, V);
     this.keep(ce.dlogits); this.keep(ce.loss);
 
@@ -331,6 +337,7 @@ export class GpuModel {
         p.decay ? 0.1 : 0.0);
     }
 
+    this.ops.endBatch(); // submit the whole step at once
     const lossArr = await ce.loss.download();
     let total = 0;
     for (const x2 of lossArr) total += x2;
@@ -338,8 +345,10 @@ export class GpuModel {
     return total / N;
   }
 
+  // Return every per-step tensor to the buffer pool (not destroyed) so the
+  // next step reuses the buffers — after step 1, a run does no allocation.
   private freeScratch(): void {
-    for (const t of this.scratch) t.destroy();
+    for (const t of this.scratch) t.recycle();
     this.scratch = [];
   }
 }

@@ -12,7 +12,7 @@
  */
 
 import shader from "./train.wgsl?raw";
-import { GpuTensor, type GpuContext } from "./tensor";
+import { BufferPool, GpuTensor, type GpuContext } from "./tensor";
 
 const ENTRIES = [
   "matmul", "matmul_abt", "matmul_atb", "add", "bias_add", "bias_grad",
@@ -30,6 +30,15 @@ interface Params {
 }
 
 export class GpuOps {
+  // A whole training step records into one command encoder and submits once —
+  // hundreds of per-kernel submits per step was the real bottleneck.
+  private encoder: GPUCommandEncoder | null = null;
+  private pass: GPUComputePassEncoder | null = null;
+  // One uniform buffer per dispatch in a batch (a batched submit means every
+  // writeBuffer lands before the submit, so dispatches cannot share one).
+  private readonly uniforms: GPUBuffer[] = [];
+  private uniformIdx = 0;
+
   private constructor(
     private readonly device: GPUDevice,
     private readonly layout: GPUBindGroupLayout,
@@ -37,7 +46,34 @@ export class GpuOps {
     // One distinct dummy per slot — WebGPU forbids binding the same buffer to
     // two writable-storage bindings in a bind group (aliasing).
     private readonly dummies: GPUBuffer[],
+    // Pool for per-step scratch buffers.
+    readonly pool: BufferPool,
   ) {}
+
+  /** Start recording a batch of dispatches into a single command buffer. */
+  beginBatch(): void {
+    this.encoder = this.device.createCommandEncoder();
+    this.pass = this.encoder.beginComputePass();
+    this.uniformIdx = 0;
+  }
+
+  /** Finish the batch — submit every recorded dispatch in one go. */
+  endBatch(): void {
+    if (!this.pass || !this.encoder) return;
+    this.pass.end();
+    this.device.queue.submit([this.encoder.finish()]);
+    this.pass = null;
+    this.encoder = null;
+  }
+
+  private nextUniform(): GPUBuffer {
+    if (this.uniformIdx >= this.uniforms.length) {
+      this.uniforms.push(this.device.createBuffer({
+        size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      }));
+    }
+    return this.uniforms[this.uniformIdx++];
+  }
 
   static create(ctx: GpuContext): GpuOps {
     const device = ctx.device;
@@ -68,11 +104,18 @@ export class GpuOps {
     for (let i = 0; i < 6; i++) {
       dummies.push(device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE }));
     }
-    return new GpuOps(device, layout, pipelines, dummies);
+    return new GpuOps(device, layout, pipelines, dummies, new BufferPool(device));
   }
 
   private newTensor(size: number, label: string): GpuTensor {
-    return new GpuTensor(this.device, size, label);
+    return new GpuTensor(this.device, size, { pool: this.pool, label });
+  }
+
+  /** A pooled tensor filled with host data — for per-step inputs (ids/targets). */
+  upload(data: Float32Array): GpuTensor {
+    const t = new GpuTensor(this.device, data.length, { pool: this.pool });
+    t.upload(data);
+    return t;
   }
 
   /** Dispatch one kernel. `buffers` fill g0..g5 in order; unused slots get a
@@ -84,6 +127,11 @@ export class GpuOps {
     wgX: number,
     wgY = 1,
   ): void {
+    // A standalone call (e.g. a parity test) records and submits on its own;
+    // inside beginBatch/endBatch it just records into the shared pass.
+    const ownBatch = this.pass === null;
+    if (ownBatch) this.beginBatch();
+
     const u = new ArrayBuffer(32);
     const dv = new DataView(u);
     dv.setUint32(0, params.a ?? 0, true);
@@ -94,11 +142,8 @@ export class GpuOps {
     dv.setFloat32(20, params.fb ?? 0, true);
     dv.setFloat32(24, params.fc ?? 0, true);
     dv.setFloat32(28, params.fd ?? 0, true);
-    const pbuf = this.device.createBuffer({
-      size: 32,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(pbuf, 0, u);
+    const ubuf = this.nextUniform();
+    this.device.queue.writeBuffer(ubuf, 0, u);
 
     const entries: GPUBindGroupEntry[] = [];
     for (let i = 0; i < 6; i++) {
@@ -109,17 +154,15 @@ export class GpuOps {
         },
       });
     }
-    entries.push({ binding: 6, resource: { buffer: pbuf } });
+    entries.push({ binding: 6, resource: { buffer: ubuf } });
     const bind = this.device.createBindGroup({ layout: this.layout, entries });
 
-    const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
+    const pass = this.pass as GPUComputePassEncoder;
     pass.setPipeline(this.pipelines[entry]);
     pass.setBindGroup(0, bind);
     pass.dispatchWorkgroups(wgX, wgY);
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
-    pbuf.destroy();
+
+    if (ownBatch) this.endBatch();
   }
 
   // --- matmul --------------------------------------------------------------

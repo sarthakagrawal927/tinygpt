@@ -76,28 +76,35 @@ stages (`webgpu/`):
 the project's overfit gate run on the GPU (loss 5.55 → 0.002 in 150 steps), and
 a headless-browser e2e that trains on the WebGPU backend.
 
-**Speed is not there yet, and this is the honest part.** Measured in headless
-Chromium, the same config trained on each backend:
+### Optimizations done
 
-| Model | WASM (SIMD) | WebGPU      | WebGPU vs WASM |
-| ----- | ----------- | ----------- | -------------- |
-| 0.07M | 24,858 tok/s | 11,005 tok/s | 0.45× (slower) |
-| 0.36M |  4,769 tok/s |  2,691 tok/s | 0.58× (slower) |
+- **Buffer pool** (`webgpu/tensor.ts`) — per-step activation/gradient buffers
+  are returned to a pool and reused; after step 1 a run allocates no buffers.
+- **One submit per step** (`webgpu/ops.ts`) — a whole step's dispatches record
+  into a single command encoder and submit once, instead of one submit per
+  kernel.
 
-WebGPU training is currently **~2× slower** than the WASM path, not faster. The
-implementation is naive about memory: every step allocates fresh GPU buffers for
-every activation and gradient and frees them at the end of the step (the `keep`
-/ `freeScratch` pattern in `gpu_model.ts`), and it downloads the loss every
-step, which forces a full GPU sync. That per-step buffer churn dominates — the
-kernels are fast, the orchestration is what's slow.
+Both are real reductions in CPU-side overhead and both keep every parity check
+and the overfit gate green.
 
-One encouraging sign: WebGPU's relative speed *improves* with model size
-(0.45× → 0.58×), because larger tensors mean more compute per dispatch to
-amortize the fixed overhead against. The crossover — where the GPU's
-parallelism finally wins — is past these sizes.
+### Why there is no speed number here — and it matters
 
-The optimization that unlocks the real speed-up: a **buffer pool** — allocate
-the activation/gradient buffers once for a given batch shape and reuse them
-across steps (exactly what `wasm/src/model.cpp` already does on the CPU side),
-and stop syncing every step. That is the clear next piece of work; the kernels
-and the orchestration are correct and in place for it.
+WebGPU's speed **cannot be measured in this project's test setup.** The headless
+Chromium that runs the e2e exposes a WebGPU adapter whose architecture is
+`swiftshader` — Google's *software* renderer. It is a CPU implementation of the
+WebGPU API; it never touches a real GPU.
+
+So any headless "WebGPU vs WASM" number is *software-emulated WebGPU vs
+SIMD-vectorized WASM* — and WASM wins that, which says nothing about real
+hardware. (An earlier version of this file quoted such numbers as a verdict;
+that was wrong, and is the reason the buffer-pool and batching optimizations
+showed no change — SwiftShader's bottleneck is its own software compute, not
+buffer allocation or submit count.)
+
+**To measure the real thing:** open the app in a normal browser on a machine
+with a real GPU, pick the WebGPU backend, and read the tokens/sec in the
+playground. That is the only valid measurement, and it is not something the
+headless CI can do. On a real GPU the matmul-heavy work parallelizes hard;
+whether end-to-end training beats WASM depends on how much the small
+elementwise kernels' dispatch overhead costs. That number is genuinely unknown
+until run on hardware — this doc will not guess it.
