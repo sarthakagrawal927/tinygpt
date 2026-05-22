@@ -28,14 +28,17 @@ The same model exists at three levels, built in that order:
   it's the clearest.
 - `wasm/` — the same maths in C++, every backward pass derived and written by
   hand (there is no autograd engine), compiled to WebAssembly with Emscripten.
-- `webgpu/` — one matrix-multiply compute shader in WGSL, checked against the
-  WASM version.
+- `webgpu/` — the whole training loop in WGSL: a GPU model with forward,
+  backward, and AdamW, every kernel parity-checked against a reference.
 
 On top of that, `browser/` is a small web app. It trains a GPT in a Web Worker
-so the page never freezes, draws the loss as it goes, samples from the model,
-and saves checkpoints to OPFS so a run survives a refresh. It also detects your
-machine and suggests a model size, estimates training time live, can pull a
-dataset from Hugging Face, and benchmarks the WebGPU matmul against WASM.
+so the page never freezes, on either backend (WASM or WebGPU), draws the loss as
+it goes, samples from the model, and saves checkpoints to OPFS so a run survives
+a refresh. It also detects your machine and suggests a model size, estimates
+training time live, and can pull a dataset from Hugging Face.
+
+Where the project stands — and what's worth a review — is in
+[`docs/status.md`](docs/status.md).
 
 Everything is gated by tests — finite-difference gradient checks on the kernels,
 an overfit check on every model, a headless-browser end-to-end run. That was the
@@ -115,8 +118,10 @@ tinygpt/
 
 ## Docs
 
+- [`docs/status.md`](docs/status.md) — where the project stands; a review map
 - [`docs/learn.md`](docs/learn.md) — the guided learning path; start here
 - [`docs/notes.md`](docs/notes.md) — what was built and what each experiment showed
+- [`docs/performance.md`](docs/performance.md) — the SIMD and WebGPU performance work
 - [`docs/model_guide.md`](docs/model_guide.md) — the model, from scratch
 - [`docs/lora_guide.md`](docs/lora_guide.md) — LoRA fine-tuning
 - [`docs/browser_notes.md`](docs/browser_notes.md) — WASM, Web Workers, OPFS, WebGPU
