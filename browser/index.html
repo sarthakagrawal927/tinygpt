@@ -53,6 +53,9 @@
         border: 1px solid #30363d; border-radius: 6px; padding: 10px;
         font: 12px/1.5 ui-monospace, monospace; min-height: 70px;
         color: #adbac7; margin-top: 8px; }
+      pre { background: #010409; border: 1px solid #30363d; border-radius: 6px;
+        padding: 10px; font: 12px/1.55 ui-monospace, monospace; color: #adbac7;
+        overflow-x: auto; margin: 0; }
       .pill { display: inline-block; padding: 1px 7px; border-radius: 10px;
         font-size: 11px; border: 1px solid #30363d; margin-right: 6px; }
       .pill.on { color: #3fb950; border-color: #238636; }
@@ -112,6 +115,7 @@ The goal here is understanding, not a clever model. If you build it yourself, by
           <span>train <b id="stTrain">–</b></span>
           <span>val <b id="stVal">–</b></span>
           <span><b id="stToks">0</b> tok/s</span>
+          <span>ETA <b id="stEta">–</b></span>
           <span>backend <b id="stBackend">wasm</b></span>
         </div>
       </div>
@@ -139,6 +143,31 @@ The goal here is understanding, not a clever model. If you build it yourself, by
       </p>
       <button id="bench" class="secondary">Run benchmark</button>
       <div id="benchOut">Not run yet.</div>
+    </div>
+
+    <div class="card" style="margin-top: 20px">
+      <h2>5 · Train larger models locally</h2>
+      <p style="margin: 0 0 10px; color: #7d8590; font-size: 13px">
+        In-browser training is single-threaded WebAssembly — comfortable up to
+        roughly <b>1M parameters</b>. To train bigger (5–25M+ is fine on a
+        laptop), run the Python reference locally, where it uses your GPU
+        (Apple&nbsp;MPS / CUDA). <code>bench.py</code> measures what your machine
+        can handle; <code>configs/model.small.json</code> is a ready ~10.8M model.
+      </p>
+      <pre><code>git clone https://github.com/sarthakagrawal927/tinygpt
+cd tinygpt
+python -m venv python_ref/.venv &amp;&amp; source python_ref/.venv/bin/activate
+pip install -r python_ref/requirements.txt
+
+# measure how fast your machine trains, at several model sizes:
+python python_ref/bench.py
+
+# train a ~10.8M model on your own text:
+python python_ref/train.py --model-config configs/model.small.json \
+    --data your-text.txt --out checkpoints/run
+
+# generate from it:
+python python_ref/sample.py --checkpoint checkpoints/run --prompt "Once "</code></pre>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

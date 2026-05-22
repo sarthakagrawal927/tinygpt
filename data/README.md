@@ -34,7 +34,27 @@ quantity. See `../docs/lora_guide.md` and `../docs/evaluation.md`.
 
 ## Files
 
-- `dataset_builder.py` — turns raw text into token arrays / JSONL + manifests (stub)
+- `dataset_builder.py` — turns raw text into token arrays / JSONL + manifests
 - `examples/` — small sample corpora live here
 
 `.gitignore` keeps bulk corpora out of git; `examples/` is kept.
+
+## What the model is actually trained on
+
+There is **no external or scraped dataset**. The model trains on whatever plain
+text you give it. The two corpora in `examples/` are short **original prose
+written for this project**:
+
+- `tiny-corpus.txt` (~3 KB) — explanatory prose about how a small model learns;
+  the default for from-scratch training.
+- `tiny-corpus-2.txt` (~2 KB) — terse, distinctly different prose (woodworking
+  maxims), used as the *different style* for the LoRA fine-tuning demo.
+
+The browser app ships its own short original corpus as the textarea default, and
+you can paste any text in there. They are deliberately tiny — a few KB is all
+the overfit and LoRA demos need.
+
+For a real run, supply your own plain text via `--data your.txt` (Python) or the
+browser textarea: your own notes, public-domain books, a small codebase. See the
+source guidance at the top of this file for what makes good vs. bad training
+text.

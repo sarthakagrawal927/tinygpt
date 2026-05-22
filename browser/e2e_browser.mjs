@@ -66,6 +66,8 @@ const valLoss = parseFloat((await page.textContent("#stVal")) || "NaN");
 check("training reached the step budget", step?.startsWith("400"), step);
 check("train loss fell below 1.0", trainLoss < 1.0, trainLoss.toFixed(4));
 check("val loss is a finite number", Number.isFinite(valLoss), valLoss.toFixed(4));
+check("training-time ETA reached 'done'", (await page.textContent("#stEta")) === "done",
+  await page.textContent("#stEta"));
 
 // Sampling from the trained model.
 await page.click("#sample");

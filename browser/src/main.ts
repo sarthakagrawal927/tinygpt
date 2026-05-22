@@ -36,6 +36,7 @@ const els = {
   stTrain: byId<HTMLElement>("stTrain"),
   stVal: byId<HTMLElement>("stVal"),
   stToks: byId<HTMLElement>("stToks"),
+  stEta: byId<HTMLElement>("stEta"),
   stBackend: byId<HTMLElement>("stBackend"),
   bench: byId<HTMLButtonElement>("bench"),
   benchOut: byId<HTMLDivElement>("benchOut"),
@@ -86,6 +87,15 @@ function formatParams(n: number): string {
   return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`;
 }
 
+/** Human-readable duration, for the live training-time estimate. */
+function formatTime(seconds: number): string {
+  if (seconds < 1) return "<1s";
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
 /** Fill the config inputs with a recommended model for the detected machine. */
 function applyRecommendation(rec: ModelRecommendation): void {
   byId<HTMLInputElement>("ctx").value = String(rec.ctx);
@@ -104,6 +114,7 @@ els.start.addEventListener("click", () => {
   history = [];
   chart.reset();
   els.output.textContent = "Training… generate once a few steps have run.";
+  els.stEta.textContent = "…";
   paused = false;
   els.pause.textContent = "Pause";
   setRunning(true);
@@ -178,6 +189,13 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       els.stVal.textContent = p.valLoss?.toFixed(4) ?? "–";
       els.stToks.textContent = Math.round(p.tokensPerSecond).toLocaleString();
       els.stBackend.textContent = p.backend;
+      // Live time estimate: tokens left ÷ current throughput.
+      if (lastConfig && p.tokensPerSecond > 0 && p.step < p.maxSteps) {
+        const tokensLeft = (p.maxSteps - p.step) * lastConfig.batchSize * lastConfig.ctx;
+        els.stEta.textContent = formatTime(tokensLeft / p.tokensPerSecond);
+      } else {
+        els.stEta.textContent = p.step >= p.maxSteps ? "done" : "…";
+      }
       break;
     }
     case "sample":
@@ -197,6 +215,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       break;
     case "done":
       setRunning(false);
+      els.stEta.textContent = msg.reason === "finished" ? "done" : "–";
       els.status.textContent =
         msg.reason === "finished"
           ? "training complete — saved to storage, survives a refresh"
