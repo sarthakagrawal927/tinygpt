@@ -131,17 +131,30 @@ export class GpuOps {
     return c;
   }
 
+  /** C = A @ Bᵀ.   A:[M,K]  B:[N,K]  ->  [M,N]   (also the tied output head). */
+  matmulAbt(a: GpuTensor, b: GpuTensor, M: number, K: number, N: number): GpuTensor {
+    const c = this.newTensor(M * N, "matmul.abt");
+    this.dispatch("matmul_abt", [a, b, c], { a: M, b: K, c: N },
+      Math.ceil(M / 16), Math.ceil(N / 16));
+    return c;
+  }
+
+  /** C = Aᵀ @ B.   A:[K,M]  B:[K,N]  ->  [M,N] */
+  matmulAtb(a: GpuTensor, b: GpuTensor, M: number, K: number, N: number): GpuTensor {
+    const c = this.newTensor(M * N, "matmul.atb");
+    this.dispatch("matmul_atb", [a, b, c], { a: M, b: K, c: N },
+      Math.ceil(M / 16), Math.ceil(N / 16));
+    return c;
+  }
+
   /** Backward of C = A @ B:  dA = dC@Bᵀ [M,K],  dB = Aᵀ@dC [K,N]. */
   matmulBackward(
     a: GpuTensor, b: GpuTensor, dC: GpuTensor, M: number, K: number, N: number,
   ): { dA: GpuTensor; dB: GpuTensor } {
-    const dA = this.newTensor(M * K, "matmul.dA");
-    this.dispatch("matmul_abt", [dC, b, dA], { a: M, b: N, c: K },
-      Math.ceil(M / 16), Math.ceil(K / 16));
-    const dB = this.newTensor(K * N, "matmul.dB");
-    this.dispatch("matmul_atb", [a, dC, dB], { a: K, b: M, c: N },
-      Math.ceil(K / 16), Math.ceil(N / 16));
-    return { dA, dB };
+    return {
+      dA: this.matmulAbt(dC, b, M, N, K), // dC:[M,N] @ B:[K,N]ᵀ -> [M,K]
+      dB: this.matmulAtb(a, dC, K, M, N), // A:[M,K]ᵀ @ dC:[M,N] -> [K,N]
+    };
   }
 
   // --- elementwise ---------------------------------------------------------

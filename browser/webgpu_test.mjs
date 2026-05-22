@@ -22,7 +22,7 @@ await page.goto(`${BASE}/webgpu-test.html`, { waitUntil: "load" });
 await page.waitForFunction(
   () => /ALL PASS|FAILED|SKIP/.test(document.getElementById("results")?.textContent || ""),
   undefined,
-  { timeout: 60000 },
+  { timeout: 180000 }, // the stage-5 overfit test runs 150 training steps
 );
 
 const text = (await page.textContent("#results")) || "";

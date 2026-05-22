@@ -6,6 +6,7 @@
  * This is the verification harness every WebGPU-training stage adds to.
  */
 
+import { GpuModel } from "../../webgpu/gpu_model";
 import { GpuOps } from "../../webgpu/ops";
 import { createGpuContext, GpuTensor } from "../../webgpu/tensor";
 
@@ -343,6 +344,33 @@ async function main(): Promise<void> {
       refP[i] = pm[i] - lr * (mh / (Math.sqrt(vh) + eps) + wd * pm[i]);
     }
     check("adamw step", maxError(pAfter, refP) < tol, "");
+  }
+
+  // --- full GPU training: the overfit gate (stage 5) ----------------------
+  // If the entire GPU forward + backward + AdamW is correct, a tiny model
+  // drives the loss on one fixed batch from ~ln(256) to near zero.
+  {
+    const cfg = { vocab: 256, ctx: 16, layers: 2, heads: 2, dModel: 32, dMlp: 64, seed: 42 };
+    const model = new GpuModel(ctx, cfg);
+    const batch = 8;
+    const corpus = new TextEncoder().encode(
+      "the quick brown fox jumps over the lazy dog. ".repeat(20));
+    const ids = new Float32Array(batch * cfg.ctx);
+    const targets = new Float32Array(batch * cfg.ctx);
+    for (let b = 0; b < batch; b++) {
+      const s = b * 7;
+      for (let t = 0; t < cfg.ctx; t++) {
+        ids[b * cfg.ctx + t] = corpus[s + t];
+        targets[b * cfg.ctx + t] = corpus[s + t + 1];
+      }
+    }
+    const first = await model.trainStep(ids, targets, batch, 5e-3);
+    let loss = first;
+    for (let i = 0; i < 150; i++) loss = await model.trainStep(ids, targets, batch, 5e-3);
+    check("gpu training: initial loss ~ ln(256)", Math.abs(first - 5.545) < 0.7,
+      first.toFixed(3));
+    check("gpu training: overfits a batch (loss < 0.5)", loss < 0.5,
+      `${first.toFixed(2)} -> ${loss.toFixed(3)}`);
   }
 
   out.textContent =
