@@ -1,143 +1,134 @@
 # tinygpt
 
-A learning project: a **browser-capable TinyGPT** system that can (1) train a tiny
-GPT from scratch and (2) adapt a small base model with **LoRA** — built as a correct
-Python reference first, then ported to WASM, then accelerated with WebGPU.
+A GPT small enough to read in an afternoon. About 0.8M parameters — byte-level,
+no dependencies you can't inspect — written so every part can be understood and
+is backed by a test.
 
-This is a learning sandbox, not a deployed fleet product. The goal is **correctness
-and understanding**, not impressive output.
+It does three things: trains a transformer from scratch, fine-tunes one with
+LoRA, and runs both in the browser. None of it produces good text; a model this
+size can't. The point was to build the whole modern LLM stack at a size where
+nothing stays a black box.
 
-## New to AI? Start here → [`docs/learn.md`](docs/learn.md)
+It started as a documented scaffold and is now finished — the ten build
+milestones in [`MILESTONES.md`](MILESTONES.md) are all done.
 
-If you are a software engineer with little or no machine-learning background,
-**[`docs/learn.md`](docs/learn.md)** is a guided path through this *entire* repo.
-For each concept it links the best free explainer, then the exact file that
-implements it here, then the test that proves it works — in order, until none of
-it is a black box. Read that first; the rest of this README is the reference map.
+## New to this? Read docs/learn.md
 
-## Two browser targets
+If you can write code but have never built a neural network,
+[`docs/learn.md`](docs/learn.md) is a guided path through the whole repo: for
+each idea it links a good explainer, points at the file here that implements it,
+and names the test that proves it. The rest of this README is just the map.
 
-| Mode               | Purpose                              | Model                                  |
-| ------------------ | ------------------------------------ | -------------------------------------- |
-| Train from scratch | Learn how GPT training works         | 0.5M–3M param byte-level TinyGPT       |
-| LoRA fine-tune     | Learn personalization/style adapting | 5M–15M frozen base + tiny LoRA adapter |
+## What's in it
 
-## Build order (do not reorder)
+The same model exists at three levels, built in that order:
+
+- `python_ref/` — the PyTorch reference: model, training loop, sampler, LoRA, an
+  evaluation harness, and `bench.py` to measure training speed. Read this first;
+  it's the clearest.
+- `wasm/` — the same maths in C++, every backward pass derived and written by
+  hand (there is no autograd engine), compiled to WebAssembly with Emscripten.
+- `webgpu/` — one matrix-multiply compute shader in WGSL, checked against the
+  WASM version.
+
+On top of that, `browser/` is a small web app. It trains a GPT in a Web Worker
+so the page never freezes, draws the loss as it goes, samples from the model,
+and saves checkpoints to OPFS so a run survives a refresh. It also detects your
+machine and suggests a model size, estimates training time live, can pull a
+dataset from Hugging Face, and benchmarks the WebGPU matmul against WASM.
+
+Everything is gated by tests — finite-difference gradient checks on the kernels,
+an overfit check on every model, a headless-browser end-to-end run. That was the
+method throughout: no layer was trusted until a test pinned it down.
+
+## Build order
+
+It mattered, and the project followed it strictly: PyTorch reference first, then
+the C++/WASM port, then WebGPU. A bug in a WASM kernel and a bug in browser glue
+look identical from the UI, so the maths was made correct twice — in PyTorch,
+then in native C++ — before anything ran in a browser.
+
+## Running it
+
+The Python reference:
 
 ```
-Phase 1: Python / PyTorch reference   → python_ref/
-Phase 2: TinyGPT from scratch (TS/C++/Rust)
-Phase 3: LoRA on the tiny base model  → python_ref/lora.py
-Phase 4: Browser WASM implementation  → browser/ + wasm/
-Phase 5: WebGPU acceleration          → webgpu/
-```
-
-**Never start in the browser.** Build a correct reference, then port. WebGPU is
-browser/platform-dependent and HTTPS-only, so the browser build needs a WASM fallback.
-
-## Status
-
-**All nine implementation milestones are done and verified.** Phases 1–5 — the
-Python reference, LoRA, the WASM backend, the browser training app, and the
-WebGPU kernel — all work end-to-end:
-
-- `python_ref/` — runnable PyTorch reference (`model`, `dataset`, `train`,
-  `sample`, `checkpoint`, `lora`, `evaluate`).
-- `wasm/src/` — five C++ kernels + a full C++ TinyGPT, all hand-written
-  forward+backward, compiled to WebAssembly with Emscripten.
-- `webgpu/` — a WGSL matmul compute kernel, bit-exact vs WASM and ~1.9× faster.
-- `browser/` — a Vite app that trains a byte-level GPT from scratch in a Web
-  Worker, with a live loss chart, OPFS checkpointing, and a WebGPU benchmark;
-  the UI never freezes.
-
-Verified: `tests/` 14/14 Python + 18/18 C++ kernel checks + the C++ model
-overfit/checkpoint gates; the compiled module trains from Node; a
-headless-browser e2e trains to completion (loss 5.5 → 0.017), runs the WebGPU
-benchmark, and confirms the model survives a page refresh.
-
-The detailed write-up — every component, every design decision, and the
-concrete result that verified each one — is in [`docs/notes.md`](docs/notes.md).
-
-Progress tracker: [`MILESTONES.md`](MILESTONES.md) — **10/10 milestones done**.
-Interactive-feature backlog: [`docs/feature_ideas.md`](docs/feature_ideas.md).
-
-## Running the Python reference
-
-```bash
 python -m venv python_ref/.venv && source python_ref/.venv/bin/activate
 pip install -r python_ref/requirements.txt
-
-# Phase 1 — train a tiny model from scratch
-python tests/test_phase1.py                                   # correctness gate
+python tests/test_phase1.py                 # the correctness gate
+python python_ref/train.py --overfit        # watch a loss curve fall
 python python_ref/train.py --data data/examples/tiny-corpus.txt --out checkpoints/base
 python python_ref/sample.py --checkpoint checkpoints/base --prompt "A small model "
-python python_ref/train.py --overfit                          # built-in smoke run
-python python_ref/bench.py                                    # measure training speed by model size
+```
 
-# Train a larger (~10.8M) model locally — too big for comfortable in-browser training
+The browser app:
+
+```
+bash wasm/build_wasm.sh          # compile the C++ to WebAssembly (needs Emscripten)
+cd browser && npm install && npm run dev
+```
+
+Open the printed URL and click Start. The C++ kernels can also be checked
+without Emscripten — `bash wasm/build_native.sh` builds and tests them with a
+normal compiler.
+
+## How big a model can you train
+
+In the browser, small. Training is single-threaded WebAssembly. Measured on an
+M5 Pro laptop: a 0.36M model is about 0.4s per step, a 1.3M model about 2.6s — so
+a real run of anything past ~0.5M takes ten minutes or more. The app detects
+your machine, suggests a size, and shows a live time estimate once training
+starts; trust the estimate. Around 1.5M parameters is the practical ceiling
+in-browser.
+
+Locally it's a different story. On the same laptop the Python trainer does a
+10M model at ~24s per 1,000 steps, a 25M model at ~47s — fine for real
+iteration. Run `python python_ref/bench.py` to measure your own machine.
+`configs/model.small.json` is a ready ~10.8M config:
+
+```
 python python_ref/train.py --model-config configs/model.small.json --data your-text.txt
-
-# Phase 3 — LoRA fine-tune a frozen base onto a different corpus
-python tests/test_lora.py                                     # LoRA correctness
-python python_ref/lora.py --base checkpoints/base --data data/examples/tiny-corpus-2.txt \
-    --out checkpoints/adapter
-python python_ref/lora.py --base checkpoints/base --adapter checkpoints/adapter \
-    --compare --prompt "The "
-
-# Milestone 4 — the base / few-shot / LoRA / LoRA+retrieval comparison matrix
-python python_ref/evaluate.py --base checkpoints/base --adapter checkpoints/adapter
-
-# Phase 4 — verify the WASM C++ kernels + model natively (needs only clang/g++)
-bash wasm/build_native.sh
 ```
 
-## Running the browser app (Phase 4)
+## Training data
 
-```bash
-bash wasm/build_wasm.sh          # compile kernels+model to WASM (needs Emscripten)
-cd browser && npm install
-npm run dev                      # open the printed localhost URL, then "Start training"
-```
-
-`node tests/smoke_wasm_node.mjs` verifies the compiled WASM module from Node;
-`npm run e2e` (in `browser/`, after `npm run build` + `npm run preview`) drives
-the whole app in a headless browser.
+There's no bundled dataset. The files in `data/examples/` are short original
+prose written for this project; for anything real you supply your own text
+(`--data`, or the browser textarea). The browser app and
+`data/dataset_builder.py` can also pull an open dataset from the Hugging Face
+Hub — see [`data/README.md`](data/README.md).
 
 ## Layout
 
 ```
 tinygpt/
-  configs/        Exact model / training / LoRA specs as JSON
-  python_ref/     Phase 1–3 — PyTorch reference (model, dataset, train, sample, lora)
-  browser/        Phase 4 — UI, Web Worker, tokenizer, storage, runtime detection
-  wasm/           Phase 4 — C++ tensor ops compiled to WebAssembly via Emscripten
-  webgpu/         Phase 5 — WGSL compute kernels + JS glue
-  data/           Dataset builder + example corpora
-  checkpoints/    Saved weights / adapters (gitignored)
-  docs/           The full implementation + learning guide
-  tests/          Required correctness tests (see tests/README.md)
+  configs/        model / training / LoRA settings, as JSON
+  python_ref/     the PyTorch reference (model, dataset, train, sample, lora, bench)
+  wasm/           C++ kernels + a full C++ model, compiled to WebAssembly
+  webgpu/         a WGSL matmul compute shader + its JS glue
+  browser/        the web app: UI, training Web Worker, tokenizer, storage
+  data/           the dataset builder + example corpora
+  checkpoints/    saved weights / adapters (gitignored)
+  docs/           the learning guide and the per-phase specs
+  tests/          the correctness tests (see tests/README.md)
 ```
 
 ## Docs
 
-- `docs/learn.md` — **the guided learning path — start here if you're new to AI**
-- `docs/model_guide.md` — building the TinyGPT model from scratch (Phase 1–2)
-- `docs/lora_guide.md` — LoRA fine-tuning (Phase 3)
-- `docs/learning_roadmap.md` — the 9-phase + 12-week learning curriculum
-- `docs/browser_notes.md` — WASM, Web Workers, OPFS, WebGPU specifics (Phase 4–5)
-- `docs/evaluation.md` — required tests, evaluation matrix, memorization checks
-- `docs/feature_ideas.md` — interactive-learning feature backlog (from 5k+ star repos)
-- `docs/notes.md` — learning write-up: every component and what each experiment showed
+- [`docs/learn.md`](docs/learn.md) — the guided learning path; start here
+- [`docs/notes.md`](docs/notes.md) — what was built and what each experiment showed
+- [`docs/model_guide.md`](docs/model_guide.md) — the model, from scratch
+- [`docs/lora_guide.md`](docs/lora_guide.md) — LoRA fine-tuning
+- [`docs/browser_notes.md`](docs/browser_notes.md) — WASM, Web Workers, OPFS, WebGPU
+- [`docs/evaluation.md`](docs/evaluation.md) — the tests and the evaluation matrix
+- [`docs/learning_roadmap.md`](docs/learning_roadmap.md) — the phase-by-phase curriculum
 
-The learning curriculum is also mirrored into the `swe-interview-prep` fleet project
-(`docs/TINYGPT_LEARNING_PATH.md`) as 19 `ml-*` FSRS-tracked concepts.
+## Prerequisites
 
-## Prerequisites (per phase)
-
-- Phase 1–3: Python 3.10+, PyTorch, NumPy (`python_ref/requirements.txt`)
-- Phase 4: Node.js, a bundler (Vite), Emscripten SDK
-- Phase 5: a WebGPU-capable browser (Chrome/Edge 113+, feature-detected)
+- Python reference: Python 3.10+, PyTorch, NumPy (`python_ref/requirements.txt`)
+- Browser app: Node.js, and the Emscripten SDK to compile the WASM module
+- The WebGPU benchmark: a WebGPU-capable browser (Chrome/Edge 113+, Safari 18+)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). Fork it, read it, learn from it.
+MIT — see [`LICENSE`](LICENSE).
