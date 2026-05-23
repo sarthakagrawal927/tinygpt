@@ -64,7 +64,7 @@ python python_ref/train.py --data data/examples/tiny-corpus.txt --out checkpoint
 python python_ref/sample.py --checkpoint checkpoints/base --prompt "A small model "
 ```
 
-The browser app:
+The browser app (locally):
 
 ```
 bash wasm/build_wasm.sh          # compile the C++ to WebAssembly (needs Emscripten)
@@ -74,6 +74,9 @@ cd browser && npm install && npm run dev
 Open the printed URL and click Start. The C++ kernels can also be checked
 without Emscripten — `bash wasm/build_native.sh` builds and tests them with a
 normal compiler.
+
+For the hosted version (Cloudflare Pages → `tinygpt.sarthakagrawal.dev`) and the
+deploy steps, see [`docs/deploy.md`](docs/deploy.md).
 
 ## How big a model can you train
 
