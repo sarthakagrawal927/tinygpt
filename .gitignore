@@ -9,6 +9,7 @@ venv/
 node_modules/
 dist/
 .vite/
+.wrangler/
 
 # Compiled WASM module (build artifact of wasm/build_wasm.sh)
 browser/public/tinygpt.js
