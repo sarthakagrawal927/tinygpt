@@ -481,3 +481,18 @@ line.
 
 The scaffold is now a working system. Every box in `MILESTONES.md` that can be
 ticked by code, is.
+
+---
+
+## 14. Related projects
+
+- **[mlc-ai/web-llm](https://github.com/mlc-ai/web-llm)** — runs already-trained
+  LLMs (Llama, Phi, Mistral, Qwen, Gemma) in the browser via WebGPU, exposing an
+  OpenAI-compatible API. It is the *other half* of the in-browser LLM story:
+  TinyGPT is how a transformer is **built and trained** from the maths up;
+  WebLLM is how a real, large pretrained model is **served** in a tab. They are
+  not stackable — WebLLM consumes MLC-compiled 4-bit artifacts, TinyGPT writes
+  its own f32 weights, and a LoRA adapter trained here cannot be applied to a
+  Llama checkpoint there. They are complementary in spirit: read this repo to
+  understand *what is happening inside the model*, read WebLLM to see *how the
+  big ones run in a browser*.
