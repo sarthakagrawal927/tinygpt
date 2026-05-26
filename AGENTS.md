@@ -32,6 +32,31 @@ See `README.md`. Specs in `configs/`, guide in `docs/`, tests in `tests/`.
 This project is a sandbox: no SaaS Maker product record, deployment, or analytics
 wiring is expected unless explicitly requested.
 
+## Project sequencing (owner's call, do not re-litigate)
+
+The order in which remaining major threads should land, as decided by the
+owner:
+
+1.  **Polish** — editorial passes + UI sweep (low cost, high value-per-hour)
+2.  **Docs / learning** — turn this from "perf demo" into "how to build a
+    GPT from scratch, narrated"
+3.  **Further perf** — small safe pushes (operator fusion, async dispatch,
+    workgroup tuning). Capped at 1-2 days.
+4.  **Astro migration** — pure cleanup. Last among the in-session items
+    because it reshuffles everything above.
+5.  **Native macOS app** (`native-mac/`) — comes BEFORE FA2. Larger
+    models become natural here, which makes FA2's payoff worth the
+    multi-day effort. See `native-mac/ROADMAP.md`.
+6.  **Flash Attention 2** (task #47) — once big models are real in the
+    Mac app, FA2's long-context win pays off. Before this point it's a
+    speculative bet on what the browser ceiling will be useful for.
+7.  **Pre-trained model gallery** — last. Implicit promise of the gallery
+    ("you can train these too") is only honest once the speed + Mac
+    paths are both shipped.
+
+If asked to flip this order, ask the owner before acting — they've reasoned
+about it.
+
 ## Safety rules for heavy GPU / compile loops (macOS host)
 
 Some work on this repo — particularly **Flash Attention 2** (task #47), the
