@@ -1,12 +1,16 @@
 # TinyGPT
 
-A GPT-2-shaped transformer, written from scratch and trained in your browser.
-Python reference, hand-written C++/WASM, hand-written WebGPU — the same model
-at three levels, with every gradient pinned down by a test.
+A GPT-2-shaped transformer, written from scratch and trained **in your browser
+tab** — **9.7× faster** than the WebAssembly baseline thanks to hand-written
+WebGPU kernels, parity-tested to within 1.1% loss drift.
 
-Live playground: **[tinygpt.sarthakagrawal.dev](https://tinygpt.sarthakagrawal.dev)**
-· Devlog: [browser/devlog.html](browser/devlog.html)
-· Roadmap: [browser/roadmap.html](browser/roadmap.html)
+Python reference, hand-written C++/WASM, hand-written WGSL — the same model at
+three levels, with every gradient pinned down by a test.
+
+**[Live playground →](https://tinygpt.sarthakagrawal.dev)**
+· [9.7× chart](browser/speedup.html)
+· [Devlog](browser/devlog.html)
+· [Roadmap](browser/roadmap.html)
 
 ![TinyGPT playground](browser/public/og-image.png)
 
