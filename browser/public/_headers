@@ -1,0 +1,22 @@
+# Cloudflare Pages headers for the TinyGPT playground.
+#
+# Cross-origin isolation enables SharedArrayBuffer, which is the precondition
+# for multi-threaded WebAssembly via Worker threads. The "cross-origin isolated"
+# pill on the page goes green once these headers land in production.
+#
+# Once SAB is available, the next perf lever (multi-thread WASM matmul) goes
+# from "blocked on infrastructure" to "blocked on a WASM rebuild" — a much
+# smaller box. See /roadmap lever #3.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+
+# The compiled WASM module + glue need to be loadable across this isolated
+# context. Public/ ships them as-is; they're our own assets so cors is fine.
+/tinygpt.js
+  Cross-Origin-Resource-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+/tinygpt.wasm
+  Cross-Origin-Resource-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

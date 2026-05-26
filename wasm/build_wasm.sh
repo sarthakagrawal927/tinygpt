@@ -23,6 +23,9 @@ if ! command -v emcc >/dev/null 2>&1; then
 fi
 
 echo "emcc: $(emcc --version | head -1)"
+# Pthread build: enables SharedArrayBuffer-backed worker threads so the matmul
+# can parallelise across CPU cores. The page must be cross-origin isolated
+# (COOP/COEP) — see browser/public/_headers and browser/vite.config.ts.
 emcc \
   "$ROOT"/wasm/src/tensor.cpp \
   "$ROOT"/wasm/src/matmul.cpp \
@@ -30,9 +33,11 @@ emcc \
   "$ROOT"/wasm/src/attention.cpp \
   "$ROOT"/wasm/src/adamw.cpp \
   "$ROOT"/wasm/src/model.cpp \
-  -O3 -std=c++17 -msimd128 \
+  -O3 -std=c++17 -msimd128 -pthread \
   -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORT_NAME=createTinyGPT \
   -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=33554432 \
+  -s MAXIMUM_MEMORY=2147483648 \
+  -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=8 \
   -s ENVIRONMENT=web,worker,node \
   -s EXPORTED_RUNTIME_METHODS=ccall,cwrap,HEAPU8,HEAPF32 \
   -s EXPORTED_FUNCTIONS=_malloc,_free \
