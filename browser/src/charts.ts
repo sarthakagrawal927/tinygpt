@@ -100,13 +100,18 @@ export class LossChart {
     this.tooltip.style.top = `${10}px`;
   }
 
-  /** Bump the backing-store resolution to match devicePixelRatio for crisp lines. */
+  /**
+   * Bump the backing-store resolution to match devicePixelRatio for crisp
+   * lines. Sizes from the canvas's actual rendered bounding box so CSS rules
+   * (e.g. width: 100%, height: 420px on .hero-loss canvas#chart) drive the
+   * logical chart size — not the static width/height attributes.
+   */
   private setupHiDpi(): void {
     const dpr = window.devicePixelRatio || 1;
-    if (dpr === 1) return;
     const { canvas } = this;
-    const cssW = canvas.width;
-    const cssH = canvas.height;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = rect.width || canvas.width;
+    const cssH = rect.height || canvas.height;
     canvas.width = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
     canvas.style.width = `${cssW}px`;

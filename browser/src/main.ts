@@ -182,8 +182,11 @@ function setProgress(step: number, maxSteps: number): void {
 }
 
 const canvas = byId<HTMLCanvasElement>("chart");
-canvas.width = canvas.clientWidth || 560;
-canvas.height = 220;
+// Let CSS drive the canvas size — the LossChart.setupHiDpi() reads the
+// rendered rect and scales the backing store accordingly. Hard-coding these
+// here overrode the CSS that wanted a 420px-tall hero chart.
+canvas.width = canvas.clientWidth || canvas.width;
+canvas.height = canvas.clientHeight || canvas.height;
 const chart = new LossChart(canvas);
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), {
@@ -917,7 +920,7 @@ function renderPersonalisation({ caps, hw, rec, browser }: PersonaliseInput): vo
       ? `your biggest open speed lever is <strong>running the Python CLI locally</strong> (CUDA / Apple MPS) — 50–100× faster than this browser path.`
       : `your machine is already near the ceiling for in-browser. Real gains now come from <strong>kernel-level work</strong> (tiled matmul, multi-threaded WASM) — see <a href="/roadmap">the roadmap</a>.`;
 
-  els.mpPreview.textContent = `${cpu.tier} CPU · ${hw.cores} cores · ${rec.tier} tier · recommended run ${recRunStr}`;
+  els.mpPreview.textContent = `${cpu.tier} · ${hw.cores}c · ${recRunStr} for the suggested model`;
 
   els.mpBody.innerHTML = `
     <div class="mp-row">
@@ -1240,6 +1243,32 @@ async function loadModelFromFile(file: File, label = file.name): Promise<void> {
       history = meta.lossHistory.map((p) => ({ step: p.step, trainLoss: p.train, valLoss: p.val ?? undefined }));
       chart.reset();
       for (const pt of history) chart.addPoint(pt);
+      // Populate the primary stats with the loaded model's final state so
+      // the Watch screen reads as "this is what you'd see if you'd trained
+      // this from scratch" rather than empty placeholders.
+      const last = history[history.length - 1];
+      const final = meta.finalLoss;
+      els.stStep.textContent = `${last.step} / ${last.step}`;
+      els.stTrain.textContent = last.trainLoss.toFixed(4);
+      els.stEta.textContent = "done";
+      const timeLabel = document.getElementById("stTimeLabel");
+      if (timeLabel) timeLabel.textContent = "Trained";
+      els.stElapsed.textContent = "loaded";
+      els.stPpl.textContent = formatPerplexity(last.trainLoss);
+      if (last.valLoss != null) {
+        els.stVal.textContent = last.valLoss.toFixed(4);
+        const best = history.reduce(
+          (b, p) => (p.valLoss != null && p.valLoss < b.loss ? { loss: p.valLoss, step: p.step } : b),
+          { loss: Infinity, step: 0 },
+        );
+        if (Number.isFinite(best.loss)) {
+          els.stBestVal.textContent = `${best.loss.toFixed(4)} @ ${best.step}`;
+          bestVal = best.loss;
+          bestValStep = best.step;
+        }
+        els.stGap.textContent = (last.valLoss - last.trainLoss).toFixed(3);
+      }
+      void final; // reserved for future use
     }
     if (meta.sample) {
       typewriteOutput(meta.sample);
@@ -1258,6 +1287,7 @@ async function loadModelFromFile(file: File, label = file.name): Promise<void> {
     byId<HTMLSelectElement>("backend").value = config.backend;
     if (els.sizePreset.value !== "custom") els.sizePreset.value = "custom";
     refreshEstimate("loaded from model file");
+    refreshSampleNote();
 
     lastConfig = config;
     latestState = state.slice(0);
@@ -1818,6 +1848,8 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       break;
     case "restored":
       els.sample.disabled = false;
+      // A restored model lives in the worker — the Watch screen is now valid.
+      (window as unknown as { __tgEnableWatch?: () => void }).__tgEnableWatch?.();
       break;
     case "done": {
       setRunning(false);

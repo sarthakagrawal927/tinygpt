@@ -34,4 +34,17 @@ await page.screenshot({ path: out, fullPage: true });
 console.log(`saved -> ${out}`);
 console.log(`  page height: ${await page.evaluate(() => document.documentElement.scrollHeight)}`);
 console.log(`  viewport: 1400x900`);
+
+// Also test mobile (375 px) and tablet (768 px)
+for (const [label, w] of [["mobile", 375], ["tablet", 768]]) {
+  await ctx.close();
+  const c2 = await browser.newContext({ viewport: { width: w, height: 800 }, deviceScaleFactor: 2 });
+  const p2 = await c2.newPage();
+  await p2.goto(url, { waitUntil: "networkidle" });
+  const wm = await p2.locator("dialog#welcome").isVisible().catch(() => false);
+  if (wm) { await p2.locator("#welcomeSkip").click(); await p2.waitForTimeout(200); }
+  const m = out.replace(/\.png$/, `-${label}.png`);
+  await p2.screenshot({ path: m, fullPage: true });
+  console.log(`  ${label} (${w}px) -> ${m}`);
+}
 await browser.close();
