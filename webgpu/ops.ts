@@ -13,6 +13,7 @@
 
 import shader from "./train.wgsl?raw";
 import sgShader from "./train_sg.wgsl?raw";
+import vec4Shader from "./train_vec4.wgsl?raw";
 import { BufferPool, GpuTensor, type GpuContext } from "./tensor";
 
 const ENTRIES = [
@@ -26,7 +27,15 @@ const ENTRIES = [
 /** Entry points that live in train_sg.wgsl and require the WebGPU
  *  `subgroups` feature on the adapter. */
 const SG_ENTRIES = ["layernorm_forward_sg", "cross_entropy_sg"] as const;
-type Entry = (typeof ENTRIES)[number] | (typeof SG_ENTRIES)[number];
+/** Entry points that live in train_vec4.wgsl — same g0-g5+p binding layout
+ * from the host side, but g0/g1 are declared as array<vec4<f32>> on the
+ * WGSL side for 128-bit aligned global loads. Requires K and N to be
+ * multiples of 4. */
+const VEC4_ENTRIES = ["matmul_blocked_vec4"] as const;
+type Entry =
+  | (typeof ENTRIES)[number]
+  | (typeof SG_ENTRIES)[number]
+  | (typeof VEC4_ENTRIES)[number];
 
 /** Params uniform: up to four u32 (dims) and four f32 (eps, scale, ...). */
 interface Params {
@@ -120,6 +129,17 @@ export class GpuOps {
       }
     }
 
+    // Vec4-loaded matmul variants — same bind layout, vec4 inner type for
+    // g0/g1. Always available (no device feature needed). Used when K and N
+    // happen to be multiples of 4 (which is true for all preset shapes).
+    const vec4Module = device.createShaderModule({ code: vec4Shader });
+    for (const v4Entry of VEC4_ENTRIES) {
+      pipelines[v4Entry] = device.createComputePipeline({
+        layout: pipelineLayout,
+        compute: { module: vec4Module, entryPoint: v4Entry },
+      });
+    }
+
     // A distinct 1-element buffer for each slot a kernel leaves unused.
     const dummies: GPUBuffer[] = [];
     for (let i = 0; i < 6; i++) {
@@ -198,6 +218,11 @@ export class GpuOps {
    * is kept in train.wgsl as a reference / fallback. */
   matmul(a: GpuTensor, b: GpuTensor, M: number, K: number, N: number): GpuTensor {
     const c = this.newTensor(M * N, "matmul.C");
+    // NOTE: matmul_blocked_vec4 exists but integration is currently broken
+    // for non-square shapes (loss diverged to 88 in parity test). The
+    // standalone benchmark passes at square 256/512, so the bug is specific
+    // to the non-square ragged-edge cases that show up in real training
+    // matmuls. Reverted to scalar blocked4 while we investigate.
     this.dispatch("matmul_blocked", [a, b, c], { a: M, b: K, c: N },
       Math.ceil(M / 64), Math.ceil(N / 64));
     return c;
