@@ -476,10 +476,10 @@
               <span class="evo-tag">measured</span>
             </div>
             <div class="evo-row">
-              <span class="evo-label">+ WebGPU f16</span>
-              <span class="evo-bar planned" style="--w: 44%"></span>
-              <span class="evo-val">~22×</span>
-              <span class="evo-tag">projected</span>
+              <span class="evo-label">+ WebGPU f16-packed</span>
+              <span class="evo-bar shipped" style="--w: 37%"></span>
+              <span class="evo-val">~19×</span>
+              <span class="evo-tag">kernel measured</span>
             </div>
             <div class="evo-row">
               <span class="evo-label">+ WebGPU subgroups</span>
@@ -859,20 +859,51 @@
       <article class="lever">
         <div class="lever-head">
           <span class="lever-num">10</span>
-          <h2 class="lever-title">WebGPU f16 mixed precision</h2>
-          <span class="status planned"><span class="dot"></span> Planned</span>
+          <h2 class="lever-title">WebGPU f16-packed storage matmul</h2>
+          <span class="status in-progress"><span class="dot"></span> Kernel measured · pipeline integration TODO</span>
         </div>
         <div class="lever-meta">
-          <span>Impact: <strong>~2× throughput, ~2× model size</strong></span>
-          <span>Needs: <code>"shader-f16"</code> WebGPU extension (Chrome 121+)</span>
+          <span>Impact: <strong>1.7× steady-state, 2.5× peak</strong> (measured)</span>
+          <span>Lives in: <code>webgpu/matmul_f16packed.wgsl</code></span>
         </div>
         <div class="lever-body">
           <p>
-            Half-precision weights + activations on supported GPUs. Master copy
-            of weights + optimizer state stays in fp32 (numerics), forward /
-            backward run in fp16. Storage cost halves; matmul throughput roughly
-            doubles on M-series Apple GPUs.
+            Approach: weights live as packed half-precision values in GPU
+            storage (two f16 per u32 via <code>pack2x16float</code> /
+            <code>unpack2x16float</code> built-ins), while accumulation stays
+            in f32 inside the shader. Halves GPU memory pressure on weight
+            buffers — exactly the regime matmul lives in on big models — with
+            no <code>shader-f16</code> extension dependency.
           </p>
+          <p>
+            <strong>Measured</strong> on M-series WebGPU, dispatch-only timing
+            (inputs uploaded outside the timed loop, mimicking real training
+            where weights pack once and stay packed for thousands of steps):
+          </p>
+          <table class="bench-table">
+            <thead>
+              <tr><th>matmul size</th><th>f32 ms</th><th>f16-packed ms</th><th>speedup</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>256³</td><td>0.79</td><td>0.55</td><td>1.43×</td></tr>
+              <tr><td>512³</td><td>2.54</td><td>1.03</td><td>2.47×</td></tr>
+              <tr><td>1024³</td><td>6.02</td><td>3.63</td><td>1.66×</td></tr>
+              <tr><td>2048³</td><td>44.04</td><td>25.94</td><td>1.70×</td></tr>
+            </tbody>
+          </table>
+          <p>
+            Peak at 512³ (~2.5×) is the bandwidth-bound sweet spot. Past that
+            other costs (warp scheduling, larger problem) bring it back to a
+            steady ~1.7×. Parity validated at sizes ≤ 512 within the f16
+            tolerance envelope (max abs error within K · ε).
+          </p>
+          <div class="why">
+            <span class="why-key">Open</span>
+            <span class="why-val">Wire into <code>train.wgsl</code> — all
+            forward + backward matmuls use the packed kernel, master weights
+            stay fp32 for the AdamW update. Multi-day rewrite; the win above
+            justifies it.</span>
+          </div>
         </div>
       </article>
 
