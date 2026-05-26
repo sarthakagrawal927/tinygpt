@@ -1077,13 +1077,10 @@ function encodeSafetensorsFile(config: RunConfig, state: ArrayBuffer): Blob {
   );
 }
 
-els.uploadModel.addEventListener("change", async () => {
-  const file = els.uploadModel.files?.[0];
-  if (!file) return;
-  setModelStatus(`loading ${file.name}…`);
+async function loadModelFromFile(file: File, label = file.name): Promise<void> {
+  setModelStatus(`loading ${label}…`);
   try {
     const { config, state, header } = await decodeModelFile(file);
-    // Surface the metadata so the user can see what they're loading.
     const meta = header as {
       finalLoss?: { step: number; train: number; val: number | null };
       sample?: string;
@@ -1093,7 +1090,7 @@ els.uploadModel.addEventListener("change", async () => {
     if (meta.finalLoss) {
       const trainTxt = meta.finalLoss.train.toFixed(3);
       const valTxt = meta.finalLoss.val != null ? `, val ${meta.finalLoss.val.toFixed(3)}` : "";
-      setModelStatus(`✓ ${file.name} · final loss ${trainTxt}${valTxt} @ step ${meta.finalLoss.step}`, "ok");
+      setModelStatus(`✓ ${label} · final loss ${trainTxt}${valTxt} @ step ${meta.finalLoss.step}`, "ok");
     }
     if (meta.lossHistory && meta.lossHistory.length > 0) {
       history = meta.lossHistory.map((p) => ({ step: p.step, trainLoss: p.train, valLoss: p.val ?? undefined }));
@@ -1103,7 +1100,6 @@ els.uploadModel.addEventListener("change", async () => {
     if (meta.sample) {
       typewriteOutput(meta.sample);
     }
-    // Mirror the file's config back to the form so the user sees what they loaded.
     byId<HTMLInputElement>("layers").value = String(config.layers);
     const dSel = byId<HTMLSelectElement>("dModel");
     if (!Array.from(dSel.options).some((o) => o.value === String(config.dModel))) {
@@ -1117,11 +1113,9 @@ els.uploadModel.addEventListener("change", async () => {
     byId<HTMLInputElement>("batch").value = String(config.batchSize);
     byId<HTMLSelectElement>("backend").value = config.backend;
     if (els.sizePreset.value !== "custom") els.sizePreset.value = "custom";
-    refreshEstimate("loaded from uploaded model file");
+    refreshEstimate("loaded from model file");
 
     lastConfig = config;
-    // Keep a copy locally so Download stays available — the transferred buffer
-    // becomes detached on this side once the worker takes ownership.
     latestState = state.slice(0);
     latestStateConfig = config;
     els.downloadModel.disabled = false;
@@ -1129,13 +1123,21 @@ els.uploadModel.addEventListener("change", async () => {
     els.continueBtn.disabled = false;
     worker.postMessage({ type: "restore", state, config }, [state]);
     if (!els.modelStatus.classList.contains("ok")) {
-      setModelStatus(`✓ loaded ${file.name} — ready to sample or continue training`, "ok");
+      setModelStatus(`✓ loaded ${label} — ready to sample or continue training`, "ok");
     }
   } catch (err) {
     setModelStatus(`couldn't load: ${err instanceof Error ? err.message : String(err)}`, "error");
-  } finally {
-    els.uploadModel.value = ""; // allow re-uploading the same file later
+    throw err;
   }
+}
+
+els.uploadModel.addEventListener("change", async () => {
+  const file = els.uploadModel.files?.[0];
+  if (!file) return;
+  try {
+    await loadModelFromFile(file);
+  } catch { /* status already set */ }
+  els.uploadModel.value = "";
 });
 
 // --- share & restore from URL --------------------------------------------
@@ -1908,11 +1910,7 @@ async function setupDemoBanner(): Promise<void> {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const blob = await resp.blob();
       const file = new File([blob], "demo.tinygpt", { type: "application/octet-stream" });
-      // Re-use the upload-file decode path so behaviour matches user uploads.
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      els.uploadModel.files = dt.files;
-      els.uploadModel.dispatchEvent(new Event("change"));
+      await loadModelFromFile(file, "pre-trained Shakespeare demo");
       banner.hidden = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
