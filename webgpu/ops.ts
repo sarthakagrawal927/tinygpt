@@ -218,12 +218,14 @@ export class GpuOps {
    * is kept in train.wgsl as a reference / fallback. */
   matmul(a: GpuTensor, b: GpuTensor, M: number, K: number, N: number): GpuTensor {
     const c = this.newTensor(M * N, "matmul.C");
-    // NOTE: matmul_blocked_vec4 exists but integration is currently broken
-    // for non-square shapes (loss diverged to 88 in parity test). The
-    // standalone benchmark passes at square 256/512, so the bug is specific
-    // to the non-square ragged-edge cases that show up in real training
-    // matmuls. Reverted to scalar blocked4 while we investigate.
-    this.dispatch("matmul_blocked", [a, b, c], { a: M, b: K, c: N },
+    // Prefer vec4-loaded variant when K and N are 4-aligned (always true
+    // for preset shapes). Measured 1.37× faster than scalar blocked4 at
+    // 2048³ standalone. (First integration attempt hit a WGSL access-mode
+    // mismatch with the shared bind-group layout — see train_vec4.wgsl
+    // comment block.)
+    const vec4Ok = (K % 4 === 0) && (N % 4 === 0);
+    const entry = vec4Ok ? "matmul_blocked_vec4" : "matmul_blocked";
+    this.dispatch(entry, [a, b, c], { a: M, b: K, c: N },
       Math.ceil(M / 64), Math.ceil(N / 64));
     return c;
   }

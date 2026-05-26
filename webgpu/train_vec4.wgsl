@@ -15,8 +15,17 @@ struct P {
   fa: f32, fb: f32, fc: f32, fd: f32,
 };
 
-@group(0) @binding(0) var<storage, read> g0: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> g1: array<vec4<f32>>;
+// Access mode MUST be read_write here, not read — the shared bind-group
+// layout in ops.ts declares all six storage buffers as type: "storage"
+// (read-write). WGSL `var<storage, read>` requires the layout to be
+// `read-only-storage`. Mismatching the two yields silently-wrong reads on
+// some implementations (Chromium/Apple included) rather than a validation
+// error — exactly the symptom we hit on the first attempt: standalone bench
+// (which created its own auto-layout) passed; train.wgsl bind-group layout
+// integration produced loss → 88. Keep these read_write even though the
+// kernel only reads from g0 and g1.
+@group(0) @binding(0) var<storage, read_write> g0: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> g1: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> g2: array<f32>;
 @group(0) @binding(3) var<storage, read_write> g3: array<f32>;
 @group(0) @binding(4) var<storage, read_write> g4: array<f32>;
