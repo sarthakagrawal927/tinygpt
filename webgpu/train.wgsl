@@ -651,6 +651,90 @@ fn attn_dv(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 
+// FA2-aware backward: dscores from q/k/L instead of from the cached attn.
+// Recovers P = exp(q·k·scale − L[t1]) inside the kernel, so the FA2 forward
+// can drop its second-pass attn writeback entirely. Same output shape as
+// attn_dscores; same downstream consumers (attn_dq / attn_dk).
+//
+// g0=q g1=k g2=L g3=dctx g4=v g5=dscores   p.a=B p.b=T p.c=C p.d=H p.fa=1/sqrt(hd)
+//
+// One invocation per (b, h, t1). Walks K once to compute P*dP per t2 and
+// the row-wide D = sum_{t2 <= t1} P · dP, then writes dscores[t1, t2] =
+// P · (dP − D). Stash array sized for ctx ≤ 1024 (Behemoth-ready, matches
+// the bump made to attn_softmax earlier this session).
+@compute @workgroup_size(64)
+fn attn_dscores_fa2(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t1 = rem % T;
+  let hd = C / H; let off = h * hd; let scale = p.fa;
+  let cb = (b * T + t1) * C + off;
+  let Lt1 = g2[(b * H + h) * T + t1];
+
+  // Pass 1: walk K once, build P[t2] and dP[t2] arrays, accumulate D.
+  var Pcache: array<f32, 1024>;
+  var dPcache: array<f32, 1024>;
+  var D: f32 = 0.0;
+  for (var t2: u32 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    var s: f32 = 0.0;
+    let kb = (b * T + t2) * C + off;
+    for (var d: u32 = 0u; d < hd; d = d + 1u) {
+      s = s + g0[cb + d] * g1[kb + d];
+    }
+    let P = exp(s * scale - Lt1);
+    var dP: f32 = 0.0;
+    let vb = (b * T + t2) * C + off;
+    for (var d: u32 = 0u; d < hd; d = d + 1u) {
+      dP = dP + g3[cb + d] * g4[vb + d];
+    }
+    Pcache[t2] = P;
+    dPcache[t2] = dP;
+    D = D + P * dP;
+  }
+
+  // Pass 2: zero the row, then write dS = P · (dP − D) for causal entries.
+  let arow = ((b * H + h) * T + t1) * T;
+  for (var t2: u32 = 0u; t2 < T; t2 = t2 + 1u) { g5[arow + t2] = 0.0; }
+  for (var t2: u32 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    g5[arow + t2] = Pcache[t2] * (dPcache[t2] - D);
+  }
+}
+
+// FA2-aware backward: dv from q/k/L instead of from the cached attn.
+// Same algorithm as attn_dv (per-K-row, walks Q rows ≥ t2), but recomputes
+// P inline from q · k · scale − L[t1].
+//
+// g0=q g1=k g2=L g3=dctx g4=dv   p.a=B p.b=T p.c=C p.d=H p.fa=1/sqrt(hd)
+@compute @workgroup_size(64)
+fn attn_dv_fa2(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t2 = rem % T;
+  let hd = C / H; let off = h * hd; let scale = p.fa;
+  let vb = (b * T + t2) * C + off;
+  let kb = (b * T + t2) * C + off;
+
+  for (var d: u32 = 0u; d < hd; d = d + 1u) {
+    var acc: f32 = 0.0;
+    for (var t1: u32 = t2; t1 < T; t1 = t1 + 1u) {
+      // Recompute S, then P = exp(S − L[t1]).
+      var s: f32 = 0.0;
+      let qb = (b * T + t1) * C + off;
+      for (var dd: u32 = 0u; dd < hd; dd = dd + 1u) {
+        s = s + g0[qb + dd] * g1[kb + dd];
+      }
+      let Lt1 = g2[(b * H + h) * T + t1];
+      let P = exp(s * scale - Lt1);
+      acc = acc + P * g3[(b * T + t1) * C + off + d];
+    }
+    g4[vb + d] = acc;
+  }
+}
+
 // --- embeddings, cross-entropy, optimizer (stage 4) ------------------------
 
 // x = tok_emb[id] + pos_emb[t]   g0=tok_emb[V,C] g1=pos_emb[Tctx,C]

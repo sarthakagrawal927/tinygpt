@@ -23,6 +23,12 @@ export default defineConfig({
   // dist/ is the default Astro output dir; declared here for documentation.
   outDir: "./dist",
 
+  // build.format = "file" emits dist/roadmap.html instead of
+  // dist/roadmap/index.html, matching the legacy Vite output shape so the
+  // existing audit scripts (which hit /roadmap.html) and any external
+  // links/social cards keep resolving.
+  build: { format: "file" },
+
   integrations: [mdx()],
 
   server: {
