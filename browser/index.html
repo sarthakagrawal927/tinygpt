@@ -700,6 +700,19 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      /* On narrow viewports, tabs scroll horizontally instead of squishing
+         to "Cur..." "Upl..." illegibility. */
+      @media (max-width: 560px) {
+        .tab-bar {
+          overflow-x: auto;
+          scrollbar-width: none;
+        }
+        .tab-bar::-webkit-scrollbar { display: none; }
+        .tab-btn {
+          flex: 0 0 auto;
+          padding: 11px 14px;
+        }
+      }
       .tab-btn:hover { color: var(--fg); background: var(--panel-2); }
       .tab-btn.active {
         color: var(--fg);
