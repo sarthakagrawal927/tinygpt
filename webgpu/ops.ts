@@ -19,7 +19,7 @@ const ENTRIES = [
   "matmul", "matmul_blocked", "matmul_abt", "matmul_abt_blocked",
   "matmul_atb", "matmul_atb_blocked", "add", "bias_add",
   "bias_grad", "gelu_forward", "gelu_backward", "layernorm_forward",
-  "layernorm_dx", "layernorm_dgb", "attn_softmax", "attn_value", "attn_dscores",
+  "layernorm_dx", "layernorm_dgb", "attn_softmax", "attn_value", "attn_fused_sv", "attn_dscores",
   "attn_dq", "attn_dk", "attn_dv", "embed_forward", "embed_tok_grad",
   "embed_pos_grad", "cross_entropy", "adamw",
 ] as const;
@@ -319,9 +319,12 @@ export class GpuOps {
     const params = { a: B, b: T, c: C, d: H, fa: 1 / Math.sqrt(C / H) };
     const wg = Math.ceil((B * H * T) / 64);
     const attn = this.newTensor(B * H * T * T, "attn");
-    this.dispatch("attn_softmax", [q, k, attn], params, wg);
     const ctx = this.newTensor(B * T * C, "ctx");
-    this.dispatch("attn_value", [attn, v, ctx], params, wg);
+    // Fused softmax+value — same output as attn_softmax → attn_value but in
+    // one kernel pass, saving the round-trip of attn through global memory.
+    // (Still writes attn because the backward kernels read it. FA2-style
+    // backward recomputation is a follow-up.)
+    this.dispatch("attn_fused_sv", [q, k, v, attn, ctx], params, wg);
     return { attn, ctx };
   }
 

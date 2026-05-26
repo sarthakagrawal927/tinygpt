@@ -435,6 +435,10 @@ fn layernorm_dgb(@builtin(global_invocation_id) gid: vec3<u32>) {
 // One invocation per (b,h,t). p.a=B p.b=T p.c=C p.d=H, p.fa = 1/sqrt(hd).
 
 // attn = softmax(causal(q.kᵀ * scale))   g0=q g1=k g2=attn
+//
+// Score array sized for ctx up to 1024 (Behemoth). Per-invocation private
+// memory ≈ 4 KB — well within Apple's limit. The previous fixed size of 256
+// silently broke at ctx > 256.
 @compute @workgroup_size(64)
 fn attn_softmax(@builtin(global_invocation_id) gid: vec3<u32>) {
   let B = p.a; let T = p.b; let C = p.c; let H = p.d;
@@ -444,7 +448,7 @@ fn attn_softmax(@builtin(global_invocation_id) gid: vec3<u32>) {
   let h = rem / T; let t1 = rem % T;
   let hd = C / H; let off = h * hd; let scale = p.fa;
 
-  var sc: array<f32, 256>;
+  var sc: array<f32, 1024>;
   var maxv = -1e30;
   let qb = (b * T + t1) * C + off;
   for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
@@ -464,6 +468,69 @@ fn attn_softmax(@builtin(global_invocation_id) gid: vec3<u32>) {
   let arow = ((b * H + h) * T + t1) * T;
   for (var t2 = 0u; t2 < T; t2 = t2 + 1u) { g2[arow + t2] = 0.0; }
   for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) { g2[arow + t2] = sc[t2] * inv; }
+}
+
+// Flash-Attention-1-style fused softmax + value: same output as
+// attn_softmax → attn_value but in one kernel pass, saving the round-trip
+// of the attention matrix through global memory between the two kernels.
+//
+// Inputs:  g0=q[B,T,C]  g1=k[B,T,C]  g2=v[B,T,C]  g3=attn[B,H,T,T]  g4=ctx[B,T,C]
+// Params:  p.a=B  p.b=T  p.c=C  p.d=H  p.fa = 1/sqrt(hd)
+//
+// We still write attn into g3 because the backward kernels read it. (FA2
+// recomputes attention on backward; we don't, yet — that's an open item.)
+// But we no longer have to read attn back into another kernel to compute
+// ctx — it's accumulated in the same pass.
+//
+// Algorithm:
+//   1. Pass 1 over K: compute all scores, track running max.
+//   2. Pass 2 over K: write softmax(scores) into attn AND multiply by V
+//      while accumulating into ctx, all in one loop.
+@compute @workgroup_size(64)
+fn attn_fused_sv(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let B = p.a; let T = p.b; let C = p.c; let H = p.d;
+  let idx = gid.x;
+  if (idx >= B * H * T) { return; }
+  let b = idx / (H * T); let rem = idx % (H * T);
+  let h = rem / T; let t1 = rem % T;
+  let hd = C / H; let off = h * hd; let scale = p.fa;
+
+  var sc: array<f32, 1024>;
+  var maxv = -1e30;
+  let qb = (b * T + t1) * C + off;
+  // Pass 1: scores + max.
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    var s = 0.0;
+    let kb = (b * T + t2) * C + off;
+    for (var d = 0u; d < hd; d = d + 1u) { s = s + g0[qb + d] * g1[kb + d]; }
+    s = s * scale;
+    sc[t2] = s;
+    if (s > maxv) { maxv = s; }
+  }
+  // Pass 2a: sum.
+  var sum = 0.0;
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    sc[t2] = exp(sc[t2] - maxv);
+    sum = sum + sc[t2];
+  }
+  let inv = 1.0 / sum;
+
+  // Write the (normalised) attention probabilities — backward kernels need them.
+  let arow = ((b * H + h) * T + t1) * T;
+  for (var t2 = 0u; t2 < T; t2 = t2 + 1u) { g3[arow + t2] = 0.0; }
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) { g3[arow + t2] = sc[t2] * inv; }
+
+  // Pass 2b: ctx[t1, :hd] = sum_{t2 <= t1} softmax(t2) * v[t2, :hd].
+  // Zero the output, then accumulate. Per-thread output is just hd floats.
+  let cb = (b * T + t1) * C + off;
+  for (var d = 0u; d < hd; d = d + 1u) { g4[cb + d] = 0.0; }
+  for (var t2 = 0u; t2 <= t1; t2 = t2 + 1u) {
+    let a = sc[t2] * inv;
+    let vb = (b * T + t2) * C + off;
+    for (var d = 0u; d < hd; d = d + 1u) {
+      g4[cb + d] = g4[cb + d] + a * g2[vb + d];
+    }
+  }
 }
 
 // ctx = attn @ v   g0=attn g1=v g2=ctx
