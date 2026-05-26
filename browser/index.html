@@ -876,6 +876,17 @@
       }
       .notify-status.error { color: var(--danger); }
       .notify-status.ok { color: var(--accent); }
+      /* On narrow viewports, "Notify me when done" was wrapping mid-label
+         alongside the action buttons (Start / Pause / Stop / Model ▾),
+         splitting it across two visual rows next to the model menu. Force
+         it onto its own line — full width below the buttons — so the
+         label stays together. */
+      @media (max-width: 560px) {
+        .notify-toggle {
+          flex-basis: 100%;
+          margin: 4px 0 0 0;
+        }
+      }
 
       /* Hyperparameters disclosure — collapsed by default behind presets */
       .hyperparam-details { margin-top: 18px; }
