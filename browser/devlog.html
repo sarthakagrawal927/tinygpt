@@ -262,7 +262,7 @@ freed cleanly</pre>
           <tr><td>256³</td><td>0.87</td><td>0.72</td><td class="num">0.45</td><td class="num">1.93×</td></tr>
           <tr><td>512³</td><td>1.74</td><td>0.86</td><td class="num">0.64</td><td class="num">2.72×</td></tr>
           <tr><td>1024³</td><td>6.43</td><td>2.85</td><td class="num">1.80</td><td class="num">3.58×</td></tr>
-          <tr><td>2048³</td><td>43.16</td><td>17.23</td><td class="num">9.12</td><td class="num">4.73×</td></tr>
+          <tr><td>2048³</td><td>47.24</td><td>17.23</td><td class="num">9.12</td><td class="num">5.18×</td></tr>
         </tbody>
       </table>
 
@@ -308,17 +308,22 @@ size 2048:  blocked4 10.15 ms vs blocked8 11.52 ms (0.88×)</pre>
         </p>
       </div>
 
-      <div class="block miss">
+      <div class="block win">
         <p>
-          <strong>vec4 global loads — wins standalone, breaks integration.</strong>
+          <strong>vec4 global loads — broke once, then root-caused.</strong>
           Same blocked4 algorithm but issuing 128-bit memory transactions for A and B.
           Standalone bench at 2048³: <em>1.37× faster than scalar blocked4</em>. Best
-          measurement in the project. Wired into <code>train.wgsl</code>, ran the end-to-end
-          parity test, and watched loss diverge to 88.67 vs WASM's 2.94 — 30× off. The
-          standalone bench used square shapes (size × size × size); production matmuls are
-          non-square (M=1024, K=96, N=96 etc.). The ragged-edge case at non-square N broke
-          something the square bench couldn't catch. Reverted; the vec4 shader is kept
-          in the repo and the standalone bench still uses it.
+          single-kernel measurement in the project. First integration attempt diverged
+          loss to 88.67 vs WASM's 2.94 — 30× off. The standalone bench used square shapes
+          with WebGPU's <code>layout: "auto"</code> (which inferred read-only-storage to
+          match the WGSL <code>var&lt;storage, read&gt;</code> declaration); production
+          uses an explicit pipeline layout declaring <code>buffer: { type: "storage" }</code>
+          — read-write. <strong>WGSL access mode and bind-group-layout type disagreeing
+          is undefined behaviour on Chromium/Apple — silently returns wrong data instead
+          of erroring at validation.</strong> Fix was one line per binding: declare all
+          six as <code>var&lt;storage, read_write&gt;</code> in <code>train_vec4.wgsl</code>
+          (the kernel only reads from g0/g1; the decoration just has to match). Parity
+          test now passes at 1.6% drift; vec4 is the default forward matmul.
         </p>
       </div>
 
@@ -376,11 +381,6 @@ size 2048:  blocked4 10.15 ms vs blocked8 11.52 ms (0.88×)</pre>
           tiling and backward recomputation. Biggest remaining lever, especially at
           ctx ≥ 256 (Mega/Behemoth presets). Multi-day rewrite — easy to get the
           backward subtly wrong.
-        </li>
-        <li>
-          <strong>vec4 integration debug</strong> — the standalone kernel wins by 1.37×.
-          The non-square ragged-edge bug is fixable; needs a bench-from-end-to-end gate
-          first.
         </li>
         <li>
           <strong>Operator fusion</strong> — residual-add + layernorm forward can fuse

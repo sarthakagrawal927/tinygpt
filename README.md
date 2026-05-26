@@ -1,154 +1,185 @@
-# tinygpt
+# TinyGPT
 
-A GPT small enough to read in an afternoon. About 0.8M parameters — byte-level,
-no dependencies you can't inspect — written so every part can be understood and
-is backed by a test.
+A GPT-2-shaped transformer, written from scratch and trained in your browser.
+Python reference, hand-written C++/WASM, hand-written WebGPU — the same model
+at three levels, with every gradient pinned down by a test.
 
-It does three things: trains a transformer from scratch, fine-tunes one with
-LoRA, and runs both in the browser. None of it produces good text; a model this
-size can't. The point was to build the whole modern LLM stack at a size where
-nothing stays a black box.
+Live playground: **[tinygpt.sarthakagrawal.dev](https://tinygpt.sarthakagrawal.dev)**
+· Devlog: [browser/devlog.html](browser/devlog.html)
+· Roadmap: [browser/roadmap.html](browser/roadmap.html)
 
-It started as a documented scaffold and is now finished — the ten build
-milestones in [`MILESTONES.md`](MILESTONES.md) are all done.
+![TinyGPT playground](browser/public/og-image.png)
 
-## New to this? Read docs/learn.md
+## Why this exists
 
-If you can write code but have never built a neural network,
-[`docs/learn.md`](docs/learn.md) is a guided path through the whole repo: for
-each idea it links a good explainer, points at the file here that implements it,
-and names the test that proves it. The rest of this README is just the map.
+It started as a teaching project — the goal was to build the whole modern LLM
+stack at a size where nothing stays a black box. Every backward pass is derived
+by hand, every kernel is parity-checked against a reference, no autograd engine
+is involved on the C++/WebGPU side.
 
-## What's in it
+Somewhere along the way it became a performance project. The interesting work
+stopped being "does the maths come out right" and started being "how fast can
+this model train inside a browser tab, without lying about the numbers." Most
+of what's in [`browser/devlog.html`](browser/devlog.html) is that second half.
 
-The same model exists at three levels, built in that order:
+## Key measured numbers
 
-- `python_ref/` — the PyTorch reference: model, training loop, sampler, LoRA, an
-  evaluation harness, and `bench.py` to measure training speed. Read this first;
-  it's the clearest.
-- `wasm/` — the same maths in C++, every backward pass derived and written by
-  hand (there is no autograd engine), compiled to WebAssembly with Emscripten.
-- `webgpu/` — the whole training loop in WGSL: a GPU model with forward,
-  backward, and AdamW, every kernel parity-checked against a reference.
+All on the same Apple M-series laptop, same model, same seed, same data.
+Reproducible from the playground's bench button or `tests/test_webgpu_train.mjs`.
 
-On top of that, `browser/` is a small web app. It trains a GPT in a Web Worker
-so the page never freezes, on either backend (WASM or WebGPU), draws the loss as
-it goes, samples from the model, and saves checkpoints to OPFS so a run survives
-a refresh. It also detects your machine and suggests a model size, estimates
-training time live, and can pull a dataset from Hugging Face.
+- **9.7× end-to-end speedup** — WASM SIMD takes 6.8 s/step, WebGPU with the
+  blocked-4×4 matmul kernel takes 0.7 s/step. Loss drift between the two
+  backends after 50 steps: 1.1% (pure float-reorder noise from different
+  GPU accumulation order).
+- **5.18× kernel speedup at 2048³ matmul** — the size that dominates the
+  Mega/Behemoth presets. Naive WebGPU matmul: 47.24 ms. Workgroup-tiled:
+  17.23 ms. Tiled + 4×4 register blocking: 9.12 ms.
+- **473M-parameter model allocated in a tab** — `-sMEMORY64=1 -sWASM_BIGINT`
+  lifts the 4 GB V8 heap ceiling. The same allocation hard-OOMs the 32-bit
+  module; on the 64-bit one it allocates cleanly in 3.7 s and takes one
+  training step in 82.2 s with `loss 5.78` (the correct initial loss for
+  random init).
 
-Where the project stands — and what's worth a review — is in
-[`docs/status.md`](docs/status.md).
+The full speed-evolution table — scalar → SIMD → threads → WebGPU naive →
+WebGPU blocked — lives on the [roadmap](browser/roadmap.html). Each measured
+bar is anchored to a number you can reproduce in the playground.
 
-Everything is gated by tests — finite-difference gradient checks on the kernels,
-an overfit check on every model, a headless-browser end-to-end run. That was the
-method throughout: no layer was trusted until a test pinned it down.
+## Architecture in three sentences
 
-## Build order
+`python_ref/` is the PyTorch reference — the clearest version, used as the
+oracle when anything else disagrees. `wasm/` is the same maths in C++ with
+every backward pass derived by hand, compiled to WebAssembly with Emscripten
+(SIMD + pthreads, plus a Memory64 build that lifts the heap ceiling).
+`webgpu/` is the whole training loop in WGSL — forward, backward, and AdamW
+— every kernel finite-difference checked and parity-tested against the WASM
+reference. All three read and write the same `.tinygpt` binary file format,
+so a model trained in one path continues training in another.
 
-It mattered, and the project followed it strictly: PyTorch reference first, then
-the C++/WASM port, then WebGPU. A bug in a WASM kernel and a bug in browser glue
-look identical from the UI, so the maths was made correct twice — in PyTorch,
-then in native C++ — before anything ran in a browser.
+## What's interesting under the hood
 
-## Running it
+The long-form is in [`browser/devlog.html`](browser/devlog.html). Short version:
 
-The Python reference:
+- **Memory64 in WebAssembly** lifts the per-tab heap cap from ~4 GB to tens
+  of GB. Build script, runtime feature-detect, and a "Behemoth" preset that
+  exercises it.
+- **A 4×4-register blocked matmul kernel** in WGSL. Workgroup-shared tiling
+  (Goto/VandeGeijn 16×16) plus a 4×4 output block per thread held in
+  registers, so each shared-memory load gets reused 4× across the
+  accumulator. The point where the kernel stops being bandwidth-bound and
+  starts being compute-bound.
+- **End-to-end parity testing as the only honest bar.** Standalone matmul
+  benchmarks lie — they hide bugs that only show up in non-square production
+  shapes. The `tests/test_webgpu_train.mjs` driver runs 50 training steps
+  under WASM and 50 under WebGPU on the same seed, then asserts loss drift
+  is below 5%. Every integration goes through that gate before it counts.
 
-```
-python -m venv python_ref/.venv && source python_ref/.venv/bin/activate
-pip install -r python_ref/requirements.txt
-python tests/test_phase1.py                 # the correctness gate
-python python_ref/train.py --overfit        # watch a loss curve fall
-python python_ref/train.py --data data/examples/tiny-corpus.txt --out checkpoints/base
-python python_ref/sample.py --checkpoint checkpoints/base --prompt "A small model "
-```
+## Negative results — the most valuable lessons came from things that didn't work
 
-The browser app (locally):
+This is the part of the project I'd most want a reviewer to look at, because
+it's the part most blog posts skip.
 
-```
-bash wasm/build_wasm.sh          # compile the C++ to WebAssembly (needs Emscripten)
-cd browser && npm install && npm run dev
-```
+- **f16-packed storage on top of tiled matmul** — standalone, packing weights
+  as two f16 per u32 was 1.7× faster than naive WebGPU matmul. Stacked on
+  top of the tiled kernel, the combined version ran *slower* than plain
+  tiled at 2048³: 17.78 ms vs 16.90 ms. Once tiling has amortized the
+  global-memory reads, the kernel is compute-bound on shared-memory ops and
+  halving global bandwidth has nowhere left to help. **Lesson:** always
+  bench an optimization against the *best* baseline, not the naive one.
+- **8×8 register blocking** — the natural next step from 4×4, with 4× the
+  arithmetic intensity per shared-memory load. Lost at every benchmarked
+  size — 0.91× at 1024³, 0.88× at 2048³. Most likely cause: 64 floats per
+  thread for the accumulator exceeds the per-thread register budget on
+  Apple GPUs, forcing register spill and dropping workgroup occupancy.
+  **Lesson:** more aggressive is not always faster.
+- **vec4 global loads — broke once, then root-caused.** Wins by 1.37×
+  standalone at 2048³, the best single-kernel speedup measured in the
+  project. First integration attempt diverged loss to 88.67 vs WASM's 2.94
+  — 30× off. Took the end-to-end parity test to catch it; the standalone
+  square-shape bench passed cleanly. **Root cause:** the WGSL kernel
+  declared `var<storage, read>` for the input buffers, but the shared
+  bind-group layout in `ops.ts` declares them as `buffer: { type: "storage" }`
+  (read-write). When WGSL access mode doesn't match the layout type,
+  Chromium/Apple silently returns wrong data instead of erroring. Fixed by
+  declaring all six bindings as `read_write` in `train_vec4.wgsl` — the
+  kernel only reads from g0/g1 anyway, the decoration just has to match.
+  Now passes parity at 1.6% drift. **Lesson:** standalone benchmarks miss
+  bugs that only show up in real training, and "the validation passed" is
+  not the same as "the data is right."
 
-Open the printed URL and click Start. The C++ kernels can also be checked
-without Emscripten — `bash wasm/build_native.sh` builds and tests them with a
-normal compiler.
+The first two are kept in the repo as documented negative results.
+The vec4 fix is shipped.
 
-For the hosted version (Cloudflare Pages → `tinygpt.sarthakagrawal.dev`) and the
-deploy steps, see [`docs/deploy.md`](docs/deploy.md).
+## Tech used
 
-## How big a model can you train
+- [PyTorch](https://pytorch.org/) — the reference path
+- [Emscripten](https://emscripten.org/) — C++ → WebAssembly (SIMD + pthreads + Memory64)
+- [WebGPU](https://www.w3.org/TR/webgpu/) + [WGSL](https://www.w3.org/TR/WGSL/) — the GPU training loop
+- [Vite](https://vitejs.dev/) + TypeScript — the playground UI
+- [Cloudflare Pages](https://pages.cloudflare.com/) — hosting
 
-In the browser, small. Training is single-threaded WebAssembly. Measured on an
-M5 Pro laptop: a 0.36M model is about 0.4s per step, a 1.3M model about 2.6s — so
-a real run of anything past ~0.5M takes ten minutes or more. The app detects
-your machine, suggests a size, and shows a live time estimate once training
-starts; trust the estimate. Around 1.5M parameters is the practical ceiling
-in-browser.
+## Try it
 
-Locally it's a different story. On the same laptop the Python trainer does a
-10M model at ~24s per 1,000 steps, a 25M model at ~47s — fine for real
-iteration. Run `python python_ref/bench.py` to measure your own machine.
-`configs/model.small.json` is a ready ~10.8M config:
+Open **[tinygpt.sarthakagrawal.dev](https://tinygpt.sarthakagrawal.dev)** and
+click Start. It detects your machine, suggests a model size, shows a live
+training-time estimate, and saves checkpoints to OPFS so a run survives a
+refresh. The WebGPU backend kicks in automatically on Chrome/Edge 113+ and
+Safari 18+.
 
-```
-python python_ref/train.py --model-config configs/model.small.json --data your-text.txt
-```
+## What's next
 
-## Training data
+- **Pre-trained model gallery** — Cloudflare R2-hosted, manifest-driven; let
+  visitors load and continue-train from real checkpoints instead of just the
+  one shipped demo. Deferred until the speed work is fully shipped, so the
+  gallery's implicit "you can train these too" promise is honest.
+- **Full Flash Attention 2** in WGSL — workgroup-cooperative attention with
+  tiling and backward recomputation. The biggest remaining lever at ctx ≥ 256.
+- **Native macOS app** — MLX-Swift + SwiftUI, same `.tinygpt` file format both
+  ways, lifts the model-size ceiling into the 7B–30B range on Apple Silicon.
+  See [`docs/shared_vs_native.md`](docs/shared_vs_native.md) for the boundary.
 
-There's no bundled dataset. The files in `data/examples/` are short original
-prose written for this project; for anything real you supply your own text
-(`--data`, or the browser textarea). The browser app and
-`data/dataset_builder.py` can also pull an open dataset from the Hugging Face
-Hub — see [`data/README.md`](data/README.md).
-
-## Layout
+## Repo layout
 
 ```
 tinygpt/
-  configs/        model / training / LoRA settings, as JSON
-  python_ref/     the PyTorch reference (model, dataset, train, sample, lora, bench)
-  wasm/           C++ kernels + a full C++ model, compiled to WebAssembly
-  webgpu/         a WGSL matmul compute shader + its JS glue
-  browser/        the web app: UI, training Web Worker, tokenizer, storage
-  data/           the dataset builder + example corpora
-  checkpoints/    saved weights / adapters (gitignored)
-  docs/           the learning guide and the per-phase specs
-  tests/          the correctness tests (see tests/README.md)
+  python_ref/   PyTorch reference: model, train, sample, LoRA, bench
+  wasm/         C++ kernels + a full C++ model, compiled to WebAssembly
+  webgpu/       WGSL kernels (forward, backward, AdamW) + JS glue
+  browser/      The web app: UI, training Web Worker, tokenizer, storage
+  configs/      Model / training / LoRA settings as JSON
+  data/         Dataset builder + example corpora
+  docs/         The learning guide and the per-phase specs
+  tests/        Correctness tests — finite-diff, overfit, end-to-end parity
+  native-mac/   (Planned) MLX-Swift macOS app
 ```
+
+## Build it locally
+
+```
+# Python reference
+python -m venv python_ref/.venv && source python_ref/.venv/bin/activate
+pip install -r python_ref/requirements.txt
+python tests/test_phase1.py
+python python_ref/train.py --overfit
+
+# Browser app
+bash wasm/build_wasm.sh          # needs Emscripten SDK
+cd browser && npm install && npm run dev
+```
+
+The C++ kernels can also be checked without Emscripten — `bash wasm/build_native.sh`
+builds and tests them with a normal compiler. Full deploy notes:
+[`docs/deploy.md`](docs/deploy.md).
 
 ## Docs
 
 - [`docs/status.md`](docs/status.md) — where the project stands; a review map
-- [`docs/learn.md`](docs/learn.md) — the guided learning path; start here
-- [`docs/notes.md`](docs/notes.md) — what was built and what each experiment showed
+- [`docs/learn.md`](docs/learn.md) — guided learning path through the repo
 - [`docs/performance.md`](docs/performance.md) — the SIMD and WebGPU performance work
 - [`docs/model_guide.md`](docs/model_guide.md) — the model, from scratch
 - [`docs/lora_guide.md`](docs/lora_guide.md) — LoRA fine-tuning
-- [`docs/browser_notes.md`](docs/browser_notes.md) — WASM, Web Workers, OPFS, WebGPU
-- [`docs/evaluation.md`](docs/evaluation.md) — the tests and the evaluation matrix
-- [`docs/learning_roadmap.md`](docs/learning_roadmap.md) — the phase-by-phase curriculum
-
-## Prerequisites
-
-- Python reference: Python 3.10+, PyTorch, NumPy (`python_ref/requirements.txt`)
-- Browser app: Node.js, and the Emscripten SDK to compile the WASM module
-- The WebGPU benchmark: a WebGPU-capable browser (Chrome/Edge 113+, Safari 18+)
+- [`docs/shared_vs_native.md`](docs/shared_vs_native.md) — browser vs. native boundary
+- [`docs/feature_ideas.md`](docs/feature_ideas.md) — the future-ideas backlog
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-
-<!-- ACTIVE-AI-TASK-LOG:START -->
-## Active AI Task Log
-
-This section is maintained by the SaaS Maker Active-AI product/design loop so future agents do not reopen duplicate UI tasks.
-
-- Business lane: Core/status context
-- Rule: do not create another broad "improve the UI" task unless the acceptance criteria differ materially from the tasks listed here.
-- Source of truth for task status: SaaS Maker task board. README entries are durable context only.
-
-- No current Active-AI product/design task from the 2026-05-25/26 loop. Treat this as watch/status unless new evidence appears.
-<!-- ACTIVE-AI-TASK-LOG:END -->
+MIT — see [`LICENSE`](LICENSE). Author: Sarthak Agrawal ([@sarthakagrawal927](https://github.com/sarthakagrawal927)).
