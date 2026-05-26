@@ -31,6 +31,12 @@ let paused = false;
 let stopped = false;
 let training = false;
 
+// Tracking for "continue training" — keep the last successful run's setup
+// so a subsequent +N-steps call can pick up where we left off.
+let lastCfg: RunConfig | null = null;
+let lastTokens: Uint8Array | null = null;
+let lastStep = 0;
+
 const post = (msg: FromWorker, transfer?: Transferable[]) =>
   ctx.postMessage(msg, transfer);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -39,6 +45,7 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
   const msg = e.data;
   switch (msg.type) {
     case "train": void runTraining(msg.text, msg.config); break;
+    case "continue": void runContinue(msg.extraSteps); break;
     case "pause": paused = true; break;
     case "resume": paused = false; break;
     case "stop": stopped = true; break;
@@ -131,6 +138,10 @@ async function runWasm(text: string, cfg: RunConfig): Promise<void> {
   }
   const state = model.exportState();
   post({ type: "checkpoint", state: state.buffer as ArrayBuffer }, [state.buffer as ArrayBuffer]);
+  // Remember everything needed to continue from here.
+  lastCfg = cfg;
+  lastTokens = tokens;
+  lastStep = step;
   post({ type: "done", reason: stopped ? "stopped" : "finished" });
 }
 
@@ -199,6 +210,139 @@ async function runWebGpu(text: string, cfg: RunConfig): Promise<void> {
   }
   // The WebGPU model has no checkpoint serialization yet — survives-refresh
   // stays a WASM-backend feature.
+  lastCfg = cfg;
+  lastTokens = tokens;
+  lastStep = step;
+  post({ type: "done", reason: stopped ? "stopped" : "finished" });
+}
+
+/**
+ * Continue training the existing in-memory model for `extraSteps` more steps,
+ * starting from `lastStep`. Same data, same config — only the step budget
+ * changes. Sends progress messages indexed against the new total so the chart
+ * keeps the same x-axis.
+ */
+async function runContinue(extraSteps: number): Promise<void> {
+  if (training) {
+    post({ type: "error", message: "a run is already in progress" });
+    return;
+  }
+  if (!lastCfg || !lastTokens) {
+    post({ type: "error", message: "no prior run to continue — start a fresh one first" });
+    return;
+  }
+  if (extraSteps <= 0) {
+    post({ type: "error", message: "extra steps must be positive" });
+    return;
+  }
+  training = true;
+  stopped = false;
+  paused = false;
+  const startStep = lastStep;
+  const newTotal = startStep + extraSteps;
+  try {
+    if (lastCfg.backend === "wasm") {
+      if (!model) throw new Error("no WASM model in memory");
+      await continueWasm(extraSteps, startStep, newTotal);
+    } else {
+      if (!gpuModel) throw new Error("no WebGPU model in memory");
+      await continueWebgpu(extraSteps, startStep, newTotal);
+    }
+  } catch (err) {
+    post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  } finally {
+    training = false;
+  }
+}
+
+async function continueWasm(extraSteps: number, startStep: number, newTotal: number): Promise<void> {
+  if (!model || !lastCfg) return;
+  const cfg = lastCfg;
+  post({ type: "status", message: `continuing for ${extraSteps} more steps on WASM…` });
+
+  const evalFor = (split: 0 | 1) => model!.evalLoss(split, cfg.batchSize, 5);
+  const t0 = performance.now();
+  let tokensProcessed = 0;
+  let nextEval = startStep + cfg.evalEvery;
+  const chunk = 8;
+  let step = startStep;
+
+  while (step < newTotal && !stopped) {
+    if (paused) { await sleep(60); continue; }
+    let trainLoss = 0;
+    for (let i = 0; i < chunk && step < newTotal; i++) {
+      trainLoss = model.trainStep(cfg.batchSize, cfg.learningRate, cfg.gradClip);
+      tokensProcessed += cfg.batchSize * cfg.ctx;
+      step++;
+    }
+    if (step >= nextEval || step >= newTotal) {
+      const elapsed = (performance.now() - t0) / 1000;
+      post({
+        type: "progress",
+        progress: {
+          step, maxSteps: newTotal, trainLoss, valLoss: evalFor(1),
+          tokensPerSecond: elapsed > 0 ? tokensProcessed / elapsed : 0,
+          backend: "wasm",
+        },
+      });
+      nextEval += cfg.evalEvery;
+    }
+    await sleep(0);
+  }
+  const state = model.exportState();
+  post({ type: "checkpoint", state: state.buffer as ArrayBuffer }, [state.buffer as ArrayBuffer]);
+  lastStep = step;
+  // Update lastCfg.maxSteps so the next "continue" extends from this new total.
+  lastCfg = { ...cfg, maxSteps: newTotal };
+  post({ type: "done", reason: stopped ? "stopped" : "finished" });
+}
+
+async function continueWebgpu(extraSteps: number, startStep: number, newTotal: number): Promise<void> {
+  if (!gpuModel || !lastCfg || !lastTokens) return;
+  const cfg = lastCfg;
+  const tokens = lastTokens;
+  post({ type: "status", message: `continuing for ${extraSteps} more steps on WebGPU…` });
+
+  const maxStart = tokens.length - cfg.ctx - 1;
+  const sampleBatch = () => {
+    const ids = new Float32Array(cfg.batchSize * cfg.ctx);
+    const targets = new Float32Array(cfg.batchSize * cfg.ctx);
+    for (let b = 0; b < cfg.batchSize; b++) {
+      const s = Math.floor(Math.random() * (maxStart + 1));
+      for (let t = 0; t < cfg.ctx; t++) {
+        ids[b * cfg.ctx + t] = tokens[s + t];
+        targets[b * cfg.ctx + t] = tokens[s + t + 1];
+      }
+    }
+    return { ids, targets };
+  };
+
+  const t0 = performance.now();
+  let tokensProcessed = 0;
+  let step = startStep;
+  const chunk = 4;
+  while (step < newTotal && !stopped) {
+    if (paused) { await sleep(60); continue; }
+    let trainLoss = 0;
+    for (let i = 0; i < chunk && step < newTotal; i++) {
+      const { ids, targets } = sampleBatch();
+      trainLoss = await gpuModel.trainStep(ids, targets, cfg.batchSize, cfg.learningRate);
+      tokensProcessed += cfg.batchSize * cfg.ctx;
+      step++;
+    }
+    const elapsed = (performance.now() - t0) / 1000;
+    post({
+      type: "progress",
+      progress: {
+        step, maxSteps: newTotal, trainLoss,
+        tokensPerSecond: elapsed > 0 ? tokensProcessed / elapsed : 0,
+        backend: "webgpu",
+      },
+    });
+    await sleep(0);
+  }
+  lastStep = step;
+  lastCfg = { ...cfg, maxSteps: newTotal };
   post({ type: "done", reason: stopped ? "stopped" : "finished" });
 }
 
