@@ -199,6 +199,10 @@
       .status.blocked .dot { background: var(--danger); }
       .status.open { color: var(--muted); background: var(--panel-2); border: 1px solid var(--line-strong); }
       .status.open .dot { background: var(--muted); }
+      .status.in-progress { color: var(--warn); background: #f5b14a1f; border: 1px solid #5b4423; }
+      .status.in-progress .dot { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+      .status.planned { color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); }
+      .status.planned .dot { background: var(--muted); }
       @keyframes pulse {
         0%, 100% { opacity: 1; transform: scale(1); }
         50% { opacity: 0.5; transform: scale(1.4); }
@@ -610,6 +614,58 @@
         </div>
       </article>
 
+      <!-- New: native macOS app — biggest open ceiling -->
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">●</span>
+          <h2 class="lever-title">Native macOS app (MLX-Swift + SwiftUI)</h2>
+          <span class="status open"><span class="dot"></span> Open · biggest ceiling-break</span>
+        </div>
+        <div class="lever-meta">
+          <span>Unlocks: <strong>250M → 7B+ params</strong></span>
+          <span>Speed vs browser: <strong>2–10× plus much bigger models</strong></span>
+          <span>Stack: <code>MLX-Swift + SwiftUI</code></span>
+        </div>
+        <div class="lever-body">
+          <p>
+            The browser tab caps out around <strong>~250M params (fp32)</strong> — V8 heap
+            ceiling and WebGPU buffer caps stop us from going bigger no matter how fast we
+            make each step. A native macOS app removes both walls and adds direct Metal
+            access without browser-sandbox overhead.
+          </p>
+          <table class="bench-table">
+            <thead>
+              <tr><th>Hardware</th><th>Realistic max model</th><th>Approx training regime</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>M2 8 GB</td><td>~200M</td><td>30-min runs of readable English</td></tr>
+              <tr><td>M2 Pro 16 GB</td><td>~1B</td><td>locally grammatical, semantically loose</td></tr>
+              <tr><td>M2 Max 64 GB</td><td>3-7B (fp16)</td><td>tinyLlama-class, real continuation</td></tr>
+              <tr><td>M2 Ultra 128 GB</td><td>13-30B (fp16)</td><td>mini-Llama territory</td></tr>
+            </tbody>
+          </table>
+          <p>
+            <strong>Stack rationale:</strong> MLX is Apple's ML framework for Apple Silicon —
+            unified memory architecture means the GPU sees the same buffers the CPU does,
+            no copies. Native Swift bindings exist (<code>MLX-Swift</code>). The Python
+            reference's model.py ports to MLX in roughly one day; the existing kernels become
+            optimised MLX ops or we keep the hand-written ones via Metal compute shaders.
+          </p>
+          <div class="why">
+            <span class="why-key">Interop</span>
+            <span class="why-val">The app reads and writes the same <code>.tinygpt</code>
+            v2 file format. Models trained in either tool work in both. Browser stays the
+            on-ramp / demo; app is for serious work.</span>
+          </div>
+          <div class="why">
+            <span class="why-key">Scope</span>
+            <span class="why-val">5-6 weeks of focused work: 1 wk port model.py to MLX,
+            1-2 wk SwiftUI shell matching the browser playground, 2-3 wk native advantages
+            (background training, larger models, fp16, Flash Attention via MLX), 1 wk polish.</span>
+          </div>
+        </div>
+      </article>
+
       <!-- 8: Local Python — shipped -->
       <article class="lever">
         <div class="lever-head">
@@ -631,6 +687,176 @@
             This is the right answer for anyone serious — the in-browser path is for
             <em>learning the mechanics</em>, not training the next ChatGPT. The Diagnostics
             section of the playground has the three commands you need.
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">9</span>
+          <h2 class="lever-title">WebAssembly Memory64 — break the 4 GB tab ceiling</h2>
+          <span class="status in-progress"><span class="dot"></span> In progress</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~2× model size</strong> (in fp32)</span>
+          <span>Needs: <code>tinygpt64.{js,wasm}</code></span>
+        </div>
+        <div class="lever-body">
+          <p>
+            V8 caps each tab's WASM heap near 4 GB on 32-bit pointers — that's
+            ~250M fp32 params with Adam state, full stop. Memory64
+            (<code>-sMEMORY64=1 -sWASM_BIGINT</code>) switches the module to
+            64-bit pointers and lifts the cap into the tens of GB on Chromium 133+.
+          </p>
+          <p>
+            <strong>Measured:</strong> built the Memory64 variant; allocated a
+            473M-param model (~5.6 GB heap with Adam state) cleanly in Node — a
+            config that hard-OOMed on the 32-bit module. Next: wire the loader
+            to prefer the 64-bit build when the runtime supports it, and ship a
+            <em>Behemoth</em> preset that uses the extra ceiling.
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">10</span>
+          <h2 class="lever-title">WebGPU f16 mixed precision</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~2× throughput, ~2× model size</strong></span>
+          <span>Needs: <code>"shader-f16"</code> WebGPU extension (Chrome 121+)</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Half-precision weights + activations on supported GPUs. Master copy
+            of weights + optimizer state stays in fp32 (numerics), forward /
+            backward run in fp16. Storage cost halves; matmul throughput roughly
+            doubles on M-series Apple GPUs.
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">11</span>
+          <h2 class="lever-title">WebGPU subgroups — fast reductions</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~1.3–1.8× on softmax / layernorm</strong></span>
+          <span>Needs: <code>"subgroups"</code> extension (Chrome 125+)</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Replace shared-memory reduction loops in softmax / layernorm /
+            attention with subgroup intrinsics
+            (<code>subgroupAdd</code>, <code>subgroupMax</code>). One pass
+            instead of <em>log₂(blockDim)</em> passes through workgroup memory.
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">12</span>
+          <h2 class="lever-title">Flash Attention 2 in WGSL</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~3–5× on long-context</strong>, O(N) memory</span>
+          <span>Reference: Dao 2023 (FA2)</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Tile Q, K, V across workgroups; never materialize the full attention
+            matrix; recompute on backward. Today attention is the wall at
+            <code>ctxLen ≥ 512</code>. FA2 makes the 1024-context Behemoth
+            preset realistic in the browser.
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">13</span>
+          <h2 class="lever-title">LoRA fine-tuning in the browser</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>train 10×-larger frozen base models</strong></span>
+          <span>Reference: <code>python_ref/lora.py</code></span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Train low-rank adapters (rank 4–16) on top of a frozen base
+            checkpoint. Trainable parameters drop ~99%, so a 100M base + LoRA
+            fits comfortably where full fine-tuning would OOM. The
+            <code>python_ref/lora.py</code> implementation already exists; the
+            browser path needs the WASM op + a UI panel ("Adapt" beside
+            "Train").
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">14</span>
+          <h2 class="lever-title">Quantized inference (4-bit / 8-bit)</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~4× larger model loadable for sampling</strong></span>
+          <span>Methods: GPTQ / AWQ / HQQ for fp32 → int4</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Once a model is trained (or loaded), quantize to int4 / int8 for
+            sampling-only mode. The browser ceiling is dominated by Adam state
+            during training, but at inference you can drop weights to int4 and
+            run models 4× larger than you trained. Pairs naturally with the
+            <em>Behemoth</em> preset — train at 100M, sample at "what if it were
+            400M."
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">15</span>
+          <h2 class="lever-title">Muon optimizer</h2>
+          <span class="status planned"><span class="dot"></span> Planned — experimental</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~1.4–2× faster convergence vs. AdamW</strong></span>
+          <span>Reference: Keller Jordan 2024</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Orthogonalize the matrix-shaped gradients via a Newton-Schulz
+            iteration before stepping (skip the embedding + output head — those
+            stay on AdamW). Empirically matches or beats AdamW with fewer
+            steps. Drop-in port from the public reference implementation.
+          </p>
+        </div>
+      </article>
+
+      <article class="lever">
+        <div class="lever-head">
+          <span class="lever-num">16</span>
+          <h2 class="lever-title">WASM Relaxed SIMD</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>~1.1–1.3× on the WASM fallback path</strong></span>
+          <span>Flag: <code>-mrelaxed-simd</code></span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Newer SIMD ops (FMA, dot products, relaxed rounding) that the older
+            <code>-msimd128</code> set leaves on the table. Modest but free
+            uplift on the CPU code path for any machine that can't use WebGPU.
           </p>
         </div>
       </article>
