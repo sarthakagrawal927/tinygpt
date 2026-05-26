@@ -510,11 +510,16 @@
             kernel is 5.18× faster than naive, vs ~1.5–2× on Small-preset shapes.
             <strong>Striped bars</strong> are projected from per-lever impact estimates.
           </p>
-          <p style="margin-top: 8px; color: var(--faint); font-size: 12.5px;">
-            Memory64 doesn't appear on this chart because it lifts the <em>model-size
-            ceiling</em>, not training throughput. At fixed Small-preset size it's a no-op
-            — but it's the gate to running this whole pipeline on a 470M-param model.
-          </p>
+          <div style="margin-top: 14px; padding: 10px 14px; border-left: 2px solid var(--accent); background: var(--accent-glow); border-radius: 0 6px 6px 0;">
+            <p style="margin: 0; color: var(--muted); font-size: 13px;">
+              <strong style="color: var(--accent); font: 500 11px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; display: block; margin-bottom: 4px;">orthogonal lever</strong>
+              <strong>Memory64</strong> doesn't appear as a bar because it lifts the
+              <em>model-size ceiling</em>, not training throughput. At fixed Small-preset
+              size it's a no-op — but it's the only thing that lets the whole optimised
+              pipeline run on a 473M-param model in the first place (a config that
+              hard-OOMs the 32-bit WASM build).
+            </p>
+          </div>
         </div>
       </article>
 
