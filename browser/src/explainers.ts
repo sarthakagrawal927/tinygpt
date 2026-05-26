@@ -172,6 +172,14 @@ export const EXPLAINERS: Record<string, Explainer> = {
       label: "WASM SIMD proposal",
     },
   },
+  memory64: {
+    title: "WebAssembly Memory64",
+    body: "64-bit pointers in the WASM module. Without it, the tab heap is capped at 4 GB (~250M fp32 params with Adam state); with it, the cap rises into the tens of GB — enough to host the Behemoth preset. Chromium 133+, Firefox 134+. When this pill is on, you're loading tinygpt64.wasm.",
+    link: {
+      href: "https://github.com/WebAssembly/memory64",
+      label: "WASM Memory64 proposal",
+    },
+  },
   crossOriginIsolated: {
     title: "Cross-origin isolated",
     body: "Required by browsers to allow SharedArrayBuffer and high-resolution timers. Not strictly needed for this app's single-threaded training, but a 'yes' here means the page is configured for performance-sensitive work.",

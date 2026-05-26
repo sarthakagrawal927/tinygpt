@@ -9,7 +9,7 @@
  */
 
 import { benchmarkMatmul, initWebGPU } from "../../webgpu/kernels";
-import { TinyGptBackend } from "./backend";
+import { TinyGptBackend, usingMemory64 } from "./backend";
 import { HF_CATALOG, HfFetchError, fetchHfText } from "./datasets";
 import { LossChart } from "./charts";
 import {
@@ -1927,6 +1927,7 @@ async function init(): Promise<void> {
   els.caps.innerHTML =
     pill("WebGPU", caps.webgpu, "webgpuPill") +
     pill("WASM SIMD", caps.wasmSimd, "wasmSimd") +
+    pill("Memory64", usingMemory64, "memory64") +
     pill("cross-origin isolated", caps.crossOriginIsolated, "crossOriginIsolated") +
     `<span class="pill on">backend: ${caps.active}</span>` +
     `<span class="pill off">${browser.name}</span>` +
