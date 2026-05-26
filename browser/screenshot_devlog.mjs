@@ -1,0 +1,11 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ viewport: { width: 1100, height: 1500 }, deviceScaleFactor: 2 });
+const page = await ctx.newPage();
+await page.goto("http://localhost:5173/devlog.html", { waitUntil: "networkidle" });
+await page.waitForTimeout(200);
+await page.screenshot({ path: "/tmp/devlog-top.png", fullPage: false });
+console.log("-> /tmp/devlog-top.png");
+await page.screenshot({ path: "/tmp/devlog-full.png", fullPage: true });
+console.log("-> /tmp/devlog-full.png");
+await browser.close();
