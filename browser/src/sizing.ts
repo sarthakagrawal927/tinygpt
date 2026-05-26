@@ -94,7 +94,7 @@ export const PRESETS: Preset[] = [
     layers: 24, dModel: 1280, ctx: 512, batch: 1, maxSteps: 50,
     recommendedBackend: "wasm",
     requiresMemory64: true,
-    note: "the ceiling-break demo — needs Memory64 (Chromium 133+). Shows the loss curve start to fall on a half-billion-param model in your browser tab. Not meant to finish training; meant to prove the allocator works at this scale.",
+    note: "the ceiling-break demo — needs Memory64 (Chromium 133+). Shows the loss curve start to fall on a half-billion-param model in your browser tab. Not meant to finish training; meant to prove the allocator works at this scale. A 473M-param model needs ~10 GB of text to learn anything beyond memorization — point the Python CLI at a real corpus for that.",
   },
 ];
 

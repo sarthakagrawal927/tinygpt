@@ -484,13 +484,43 @@ els.start.addEventListener("click", () => {
   // most common mistakes before they cost 20 minutes of compute:
   //   - data-starved (way more params than bytes can fill)
   //   - undertrained (big model + low step budget)
+  // Tiered by severity — at Behemoth scale (473M params) on 2 MB you have
+  // ~200× more params than corpus bytes, which is pure memorization, not
+  // training. That's a different conversation than "needs slightly more data."
   const warnings: string[] = [];
-  if (bytesPerParamSeen < 5 && estParams > 500_000) {
+  const corpusMB = corpusBytes / 1_048_576;
+  // Pick a dataset recommendation appropriate to the model size. Be honest
+  // about the in-tab fetch cap (10 MB) — past that, the Python CLI is the
+  // right answer, not "fetch a bigger slice."
+  const recommendCorpus =
+    estParams < 1_000_000
+      ? "Tiny Shakespeare (~1 MB) from the Curated tab"
+      : estParams < 5_000_000
+        ? "TinyStories or WikiText-103 from the Curated tab, with Fetch bumped to 10 MB"
+        : estParams < 50_000_000
+          ? "the Python CLI with a multi-GB corpus (TinyStories, OpenWebText). The in-tab fetch caps at 10 MB, which isn't enough at this scale"
+          : "the Python CLI with a real pretraining corpus. The browser playground can host this model, but feeding it enough text to learn from (~10+ GB at this scale) isn't practical in-tab — see Diagnostics for the CLI commands";
+
+  if (bytesPerParamSeen < 0.1 && estParams > 5_000_000) {
+    warnings.push(
+      `CATASTROPHIC under-data: ${formatParams(estParams)} params against ` +
+      `${corpusMB < 1 ? `${(corpusBytes / 1024).toFixed(0)} KB` : `${corpusMB.toFixed(1)} MB`} ` +
+      `of corpus is roughly ${(1 / bytesPerParamSeen).toFixed(0)}× more parameters ` +
+      `than bytes the model will see. Training will memorize the corpus verbatim ` +
+      `and produce nothing original. Use ${recommendCorpus}.`,
+    );
+  } else if (bytesPerParamSeen < 1 && estParams > 1_000_000) {
+    warnings.push(
+      `Severely under-data: ~${bytesPerParamSeen.toFixed(2)} bytes per parameter ` +
+      `(${formatParams(estParams)} params against ${corpusMB < 1 ? `${(corpusBytes / 1024).toFixed(0)} KB` : `${corpusMB.toFixed(1)} MB`} ` +
+      `of corpus, Chinchilla floor ~20). Val loss will plateau very early; ` +
+      `most steps will be pure memorization. Use ${recommendCorpus}.`,
+    );
+  } else if (bytesPerParamSeen < 5 && estParams > 500_000) {
     warnings.push(
       `Your corpus has only ~${bytesPerParamSeen.toFixed(1)} bytes per parameter ` +
       `(Chinchilla floor is ~20). The model will plateau early; output will be ` +
-      `letter-level, not word-level. Pick a bigger dataset (TinyStories, ` +
-      `Tiny Shakespeare, Wikipedia topic) before running.`,
+      `letter-level, not word-level. Pick ${recommendCorpus}.`,
     );
   }
   if (estParams > 5_000_000 && cfg.maxSteps < 2000) {
