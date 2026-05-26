@@ -697,6 +697,13 @@
         border-radius: 10px;
         overflow: hidden;
       }
+      /* On narrow viewports, the tab bar needs to scroll horizontally
+         (5 tabs don't fit in <480px). Without this, the outer card's
+         overflow: hidden clips the last tab(s) — URL truncates to "UL"
+         and Custom disappears entirely. */
+      @media (max-width: 480px) {
+        .data-tabs { overflow-x: auto; }
+      }
       .tab-bar {
         display: flex;
         gap: 0;
@@ -2270,7 +2277,7 @@
             <div class="tab-bar" role="tablist">
               <button class="tab-btn active" data-tab="curated" type="button" role="tab">Curated</button>
               <button class="tab-btn" data-tab="upload" type="button" role="tab">Upload</button>
-              <button class="tab-btn" data-tab="wikipedia" type="button" role="tab">Wikipedia</button>
+              <button class="tab-btn" data-tab="wikipedia" type="button" role="tab" aria-label="Wikipedia">Wiki</button>
               <button class="tab-btn" data-tab="url" type="button" role="tab">URL</button>
               <button class="tab-btn" data-tab="custom" type="button" role="tab">Custom</button>
             </div>
