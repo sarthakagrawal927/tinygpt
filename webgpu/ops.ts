@@ -14,6 +14,7 @@
 import shader from "./train.wgsl?raw";
 import sgShader from "./train_sg.wgsl?raw";
 import vec4Shader from "./train_vec4.wgsl?raw";
+import fa2Shader from "./attention_fa2.wgsl?raw";
 import { BufferPool, GpuTensor, type GpuContext } from "./tensor";
 
 const ENTRIES = [
@@ -32,10 +33,19 @@ const SG_ENTRIES = ["layernorm_forward_sg", "cross_entropy_sg"] as const;
  * WGSL side for 128-bit aligned global loads. Requires K and N to be
  * multiples of 4. */
 const VEC4_ENTRIES = ["matmul_blocked_vec4"] as const;
+/** Flash-Attention-2-style fused attention forward. Same bind layout as
+ * train.wgsl (g0=q g1=k g2=v g3=attn g4=ctx, p.a=B p.b=T p.c=C p.d=H
+ * p.fa=1/sqrt(hd)). Workgroup-cooperative — one workgroup per
+ * (b, h, ceil(T/16)) — and runs online softmax in registers across K
+ * blocks. The kernel still writes the [B,H,T,T] attn matrix so the
+ * existing backward kernels stay unchanged; that writeback drops when
+ * FA2 backward (recompute on backward) lands. */
+const FA2_ENTRIES = ["fa2_forward"] as const;
 type Entry =
   | (typeof ENTRIES)[number]
   | (typeof SG_ENTRIES)[number]
-  | (typeof VEC4_ENTRIES)[number];
+  | (typeof VEC4_ENTRIES)[number]
+  | (typeof FA2_ENTRIES)[number];
 
 /** Params uniform: up to four u32 (dims) and four f32 (eps, scale, ...). */
 interface Params {
@@ -137,6 +147,17 @@ export class GpuOps {
       pipelines[v4Entry] = device.createComputePipeline({
         layout: pipelineLayout,
         compute: { module: vec4Module, entryPoint: v4Entry },
+      });
+    }
+
+    // FA2 fused attention forward — workgroup-cooperative, online softmax.
+    // Separate module because the WGSL declares a workgroup-scope Q tile
+    // sized for hd ≤ MAX_HD that train.wgsl doesn't carry.
+    const fa2Module = device.createShaderModule({ code: fa2Shader });
+    for (const fa2Entry of FA2_ENTRIES) {
+      pipelines[fa2Entry] = device.createComputePipeline({
+        layout: pipelineLayout,
+        compute: { module: fa2Module, entryPoint: fa2Entry },
       });
     }
 
@@ -344,14 +365,24 @@ export class GpuOps {
     B: number, T: number, C: number, H: number,
   ): { attn: GpuTensor; ctx: GpuTensor } {
     const params = { a: B, b: T, c: C, d: H, fa: 1 / Math.sqrt(C / H) };
-    const wg = Math.ceil((B * H * T) / 64);
     const attn = this.newTensor(B * H * T * T, "attn");
     const ctx = this.newTensor(B * T * C, "ctx");
-    // Fused softmax+value — same output as attn_softmax → attn_value but in
-    // one kernel pass, saving the round-trip of attn through global memory.
-    // (Still writes attn because the backward kernels read it. FA2-style
-    // backward recomputation is a follow-up.)
-    this.dispatch("attn_fused_sv", [q, k, v, attn, ctx], params, wg);
+    // Prefer the FA2 forward kernel when the head dim fits the workgroup
+    // storage budget (MAX_HD=64 in attention_fa2.wgsl). One workgroup per
+    // (batch, head, ceil(T/16)) tile of Q; online softmax in registers
+    // across K blocks; writes the full attn matrix in a second pass so the
+    // existing backward kernels stay unchanged. Fallback: attn_fused_sv,
+    // which is the FA1-style fused kernel for shapes the FA2 kernel can't
+    // handle yet (hd > 64).
+    const hd = C / H;
+    if (hd <= 64) {
+      // FA2 dispatch geometry: x = ceil(T/16) Q-tiles, y = B*H.
+      this.dispatch("fa2_forward", [q, k, v, attn, ctx], params,
+        Math.ceil(T / 16), B * H);
+    } else {
+      const wg = Math.ceil((B * H * T) / 64);
+      this.dispatch("attn_fused_sv", [q, k, v, attn, ctx], params, wg);
+    }
     return { attn, ctx };
   }
 
