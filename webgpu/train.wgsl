@@ -486,6 +486,16 @@ fn attn_softmax(@builtin(global_invocation_id) gid: vec3<u32>) {
 //   1. Pass 1 over K: compute all scores, track running max.
 //   2. Pass 2 over K: write softmax(scores) into attn AND multiply by V
 //      while accumulating into ctx, all in one loop.
+//
+// TODO(fa2-backward): the g3 = attn[B,H,T,T] writeback below exists only
+// because the current backward path (matmul_abt_blocked, attn_softmax_bwd,
+// attn_value_bwd) reads the full attention matrix from global memory. Once
+// the FA2 backward kernel lands and recomputes attention on-the-fly (with
+// the saved per-row max + sum statistics), every `g3[arow + t2] = ...`
+// store in this kernel can be deleted — and so can the B*H*T*T attention
+// allocation in ops.ts. Trigger condition: FA2 backward is wired through
+// gpu_model.ts and parity-checked against the reference. Until then, the
+// writeback is load-bearing.
 @compute @workgroup_size(64)
 fn attn_fused_sv(@builtin(global_invocation_id) gid: vec3<u32>) {
   let B = p.a; let T = p.b; let C = p.c; let H = p.d;
