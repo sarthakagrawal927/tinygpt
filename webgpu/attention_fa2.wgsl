@@ -237,56 +237,21 @@ fn fa2_forward(
   }
   workgroupBarrier();
 
-  // --- 5. (Compatibility) second pass: write attn[B,H,T,T] for the existing
-  // backward kernels. FA2 backward will recompute these on the fly, at which
-  // point this whole pass can go away. The work is bounded: BR × T mul-adds
-  // per workgroup, same K/V tile loads we already paid for once.
-  // We re-walk K blocks; for each (q_row, t2) we compute S then write
-  // exp(S - m_final[lane]) / l_final[lane]. Off-the-row / past-causal entries
-  // get zero.
+  // The second-pass attn writeback that used to live here is GONE.
   //
-  // First zero the full attn rows owned by this tile. One thread per row.
-  if (q_valid) {
-    let arow = ((b * H + h) * T + q_row) * T;
-    for (var t2: u32 = 0u; t2 < T; t2 = t2 + 1u) { g3[arow + t2] = 0.0; }
-  }
-  workgroupBarrier();
-
-  // Re-walk K blocks for the writeback. Q tile is still in shared memory.
-  if (q_start < T) {
-    let m_f = m_final[lane];
-    let l_f = l_final[lane];
-    let inv_l = select(0.0, 1.0 / l_f, l_f > 0.0);
-
-    for (var kj: u32 = 0u; kj < nKBlocks; kj = kj + 1u) {
-      let k_start = kj * BC;
-      if (k_start > q_end) { break; }
-
-      // Reload K tile (V isn't needed here). One thread per K row.
-      let kv_row = k_start + lane;
-      let kv_valid = kv_row < T;
-      for (var d: u32 = 0u; d < hd; d = d + 1u) {
-        var kv: f32 = 0.0;
-        if (kv_valid) { kv = g1[(b * T + kv_row) * C + off + d]; }
-        Ktile[lane][d] = kv;
-      }
-      workgroupBarrier();
-
-      if (q_valid) {
-        let arow = ((b * H + h) * T + q_row) * T;
-        for (var jj: u32 = 0u; jj < BC; jj = jj + 1u) {
-          let t2 = k_start + jj;
-          if (t2 < T && t2 <= q_row) {
-            var s: f32 = 0.0;
-            for (var d: u32 = 0u; d < hd; d = d + 1u) {
-              s = s + Qtile[lane][d] * Ktile[jj][d];
-            }
-            s = s * scale;
-            g3[arow + t2] = exp(s - m_f) * inv_l;
-          }
-        }
-      }
-      workgroupBarrier();
-    }
-  }
+  // Earlier the forward kernel re-walked K blocks to materialise the full
+  // [B,H,T,T] attention matrix into g3, because the existing backward
+  // kernels (attn_dscores, attn_dv) read it. Now that ops.ts dispatches
+  // the FA2-aware backward (attn_dscores_fa2 + attn_dv_fa2) whenever this
+  // forward runs (hd ≤ 64), backward reconstructs P = exp(S − L[t1]) from
+  // q/k/L on the fly — it never touches g3. So we skip the writeback
+  // entirely and save BR × T mul-adds per workgroup plus the O(B·H·T²)
+  // global memory traffic that used to land there. The half of the FA2
+  // memory + time win that lever 10b's negative-result entry had been
+  // waiting for.
+  //
+  // The g3 binding still exists (the shared bind layout has six storage
+  // slots; ops.ts still passes the attn tensor for shape parity), it just
+  // never gets touched in this path. Future work: stop allocating attn at
+  // all when this kernel is the chosen forward.
 }
