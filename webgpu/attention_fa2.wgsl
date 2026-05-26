@@ -221,6 +221,20 @@ fn fa2_forward(
   // a second pass without extra global memory.
   m_final[lane] = m_i;
   l_final[lane] = l_i;
+
+  // Save L = m + log(l) so the FA2 backward kernels can reconstruct
+  // P = exp(S - L) from q/k without reading the materialised attn matrix.
+  // Buffer shape: g5 = L[B, H, T], one f32 per (b, h, q_row).
+  if (q_valid) {
+    let L_idx = (b * H + h) * T + q_row;
+    if (l_i > 0.0) {
+      g5[L_idx] = m_i + log(l_i);
+    } else {
+      // Q row had no unmasked K columns; output is 0; downstream uses
+      // -inf as the marker. Match what naïve attention does in this corner.
+      g5[L_idx] = -3.4e38;
+    }
+  }
   workgroupBarrier();
 
   // --- 5. (Compatibility) second pass: write attn[B,H,T,T] for the existing

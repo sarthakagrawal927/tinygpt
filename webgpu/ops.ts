@@ -22,6 +22,7 @@ const ENTRIES = [
   "matmul_atb", "matmul_atb_blocked", "add", "bias_add",
   "bias_grad", "gelu_forward", "gelu_backward", "layernorm_forward",
   "layernorm_dx", "layernorm_dgb", "attn_softmax", "attn_value", "attn_fused_sv", "attn_dscores",
+  "attn_dscores_fa2", "attn_dv_fa2",
   "attn_dq", "attn_dk", "attn_dv", "embed_forward", "embed_tok_grad",
   "embed_pos_grad", "cross_entropy", "adamw",
 ] as const;
@@ -363,7 +364,7 @@ export class GpuOps {
   attentionForward(
     q: GpuTensor, k: GpuTensor, v: GpuTensor,
     B: number, T: number, C: number, H: number,
-  ): { attn: GpuTensor; ctx: GpuTensor } {
+  ): { attn: GpuTensor; ctx: GpuTensor; L: GpuTensor | null } {
     const params = { a: B, b: T, c: C, d: H, fa: 1 / Math.sqrt(C / H) };
     const attn = this.newTensor(B * H * T * T, "attn");
     const ctx = this.newTensor(B * T * C, "ctx");
@@ -375,33 +376,52 @@ export class GpuOps {
     // which is the FA1-style fused kernel for shapes the FA2 kernel can't
     // handle yet (hd > 64).
     const hd = C / H;
+    let L: GpuTensor | null = null;
     if (hd <= 64) {
-      // FA2 dispatch geometry: x = ceil(T/16) Q-tiles, y = B*H.
-      this.dispatch("fa2_forward", [q, k, v, attn, ctx], params,
+      // FA2 path: also save L = m + log(l) so the FA2-aware backward
+      // kernels (attn_dscores_fa2, attn_dv_fa2) can reconstruct P from
+      // q/k without reading the attn matrix.
+      L = this.newTensor(B * H * T, "L");
+      this.dispatch("fa2_forward", [q, k, v, attn, ctx, L], params,
         Math.ceil(T / 16), B * H);
     } else {
       const wg = Math.ceil((B * H * T) / 64);
       this.dispatch("attn_fused_sv", [q, k, v, attn, ctx], params, wg);
     }
-    return { attn, ctx };
+    return { attn, ctx, L };
   }
 
-  /** Backward of attention. Given the cached attn weights and dctx, returns
-   *  dq, dk, dv : each [B,T,C]. */
+  /** Backward of attention. Given the forward outputs and dctx, returns
+   *  dq, dk, dv : each [B,T,C]. If `L` is provided (FA2 forward path),
+   *  the two backward kernels that read attn (dscores + dv) get replaced
+   *  with FA2-aware variants that recompute P = exp(S − L) from q/k
+   *  instead. The attn matrix itself isn't read in that case — meaning
+   *  the FA2 forward can drop its second-pass writeback. */
   attentionBackward(
     q: GpuTensor, k: GpuTensor, v: GpuTensor, attn: GpuTensor, dctx: GpuTensor,
     B: number, T: number, C: number, H: number,
+    L: GpuTensor | null = null,
   ): { dq: GpuTensor; dk: GpuTensor; dv: GpuTensor } {
     const params = { a: B, b: T, c: C, d: H, fa: 1 / Math.sqrt(C / H) };
     const wg = Math.ceil((B * H * T) / 64);
     const dscores = this.newTensor(B * H * T * T, "dscores");
-    this.dispatch("attn_dscores", [dctx, v, attn, dscores], params, wg);
+    if (L !== null) {
+      // FA2 path: recompute P from q/k/L; never touch the attn matrix.
+      this.dispatch("attn_dscores_fa2", [q, k, L, dctx, v, dscores], params, wg);
+    } else {
+      this.dispatch("attn_dscores", [dctx, v, attn, dscores], params, wg);
+    }
     const dq = this.newTensor(B * T * C, "dq");
     this.dispatch("attn_dq", [dscores, k, dq], params, wg);
     const dk = this.newTensor(B * T * C, "dk");
     this.dispatch("attn_dk", [dscores, q, dk], params, wg);
     const dv = this.newTensor(B * T * C, "dv");
-    this.dispatch("attn_dv", [attn, dctx, dv], params, wg);
+    if (L !== null) {
+      // FA2 path: recompute P inside the kernel; doesn't need attn.
+      this.dispatch("attn_dv_fa2", [q, k, L, dctx, dv], params, wg);
+    } else {
+      this.dispatch("attn_dv", [attn, dctx, dv], params, wg);
+    }
     return { dq, dk, dv };
   }
 

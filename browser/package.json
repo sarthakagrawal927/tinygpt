@@ -5,19 +5,20 @@
   "type": "module",
   "description": "Browser TinyGPT — trains a tiny GPT in a Web Worker on WASM (Phase 4)",
   "scripts": {
-    "dev": "vite",
+    "dev": "astro dev --port 5173",
     "typecheck": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port 4173",
+    "build": "tsc --noEmit && astro build",
+    "preview": "astro preview --port 4173",
     "e2e": "node e2e_browser.mjs",
     "webgpu-test": "node webgpu_test.mjs"
   },
   "devDependencies": {
+    "@astrojs/mdx": "^4.0.0",
     "@webgpu/types": "^0.1.70",
+    "astro": "^5.0.0",
     "playwright": "^1.60.0",
     "sharp": "^0.34.5",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "typescript": "^5.6.3"
   },
   "dependencies": {
     "@floating-ui/dom": "^1.7.6",
