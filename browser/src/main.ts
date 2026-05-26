@@ -8,7 +8,7 @@
  * Guide: docs/browser_notes.md ("Web Worker")
  */
 
-import { benchmarkMatmul, initWebGPU } from "../../webgpu/kernels";
+import { benchmarkMatmul, benchmarkMatmulF16, initWebGPU } from "../../webgpu/kernels";
 import { TinyGptBackend, usingMemory64 } from "./backend";
 import { HF_CATALOG, HfFetchError, fetchHfText } from "./datasets";
 import { LossChart } from "./charts";
@@ -1524,16 +1524,25 @@ els.bench.addEventListener("click", async () => {
     els.benchOut.textContent = "loading the WASM matmul kernel…";
     const backend = await TinyGptBackend.load();
     els.benchOut.textContent = "running 384×384 matmul on WebGPU and WASM…";
-    const r = await benchmarkMatmul(
-      device,
-      (a, b, M, K, N) => backend.matmul(a, b, M, K, N),
-      384,
-    );
+    const ref = (a: Float32Array, b: Float32Array, M: number, K: number, N: number) =>
+      backend.matmul(a, b, M, K, N);
+    const r = await benchmarkMatmul(device, ref, 384);
+    els.benchOut.textContent = "running f16-packed matmul…";
+    let f16Line = "";
+    try {
+      const rF16 = await benchmarkMatmulF16(device, ref, 384);
+      f16Line = `\nf16-packed WebGPU ${rF16.f16GpuMs.toFixed(1)} ms · ` +
+        `${rF16.f16Speedup.toFixed(2)}× vs f32 WebGPU · ` +
+        `${rF16.parityOk ? "parity OK ✓" : "PARITY FAILED"} ` +
+        `(max abs error ${rF16.maxAbsError.toExponential(2)})`;
+    } catch (e) {
+      f16Line = `\nf16-packed failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
     els.benchOut.textContent =
       `${r.size}×${r.size} matmul — ${r.parityOk ? "parity OK ✓" : "PARITY FAILED"} ` +
       `(max abs error ${r.maxAbsError.toExponential(2)})\n` +
       `WASM ${r.refMs.toFixed(1)} ms · WebGPU ${r.gpuMs.toFixed(1)} ms · ` +
-      `${r.speedup.toFixed(1)}× speed-up`;
+      `${r.speedup.toFixed(1)}× speed-up` + f16Line;
   } catch (err) {
     els.benchOut.textContent = `benchmark error: ${
       err instanceof Error ? err.message : String(err)
