@@ -12,6 +12,7 @@
  */
 
 import shader from "./train.wgsl?raw";
+import sgShader from "./train_sg.wgsl?raw";
 import { BufferPool, GpuTensor, type GpuContext } from "./tensor";
 
 const ENTRIES = [
@@ -22,7 +23,10 @@ const ENTRIES = [
   "attn_dq", "attn_dk", "attn_dv", "embed_forward", "embed_tok_grad",
   "embed_pos_grad", "cross_entropy", "adamw",
 ] as const;
-type Entry = (typeof ENTRIES)[number];
+/** Entry points that live in train_sg.wgsl and require the WebGPU
+ *  `subgroups` feature on the adapter. */
+const SG_ENTRIES = ["layernorm_forward_sg", "cross_entropy_sg"] as const;
+type Entry = (typeof ENTRIES)[number] | (typeof SG_ENTRIES)[number];
 
 /** Params uniform: up to four u32 (dims) and four f32 (eps, scale, ...). */
 interface Params {
@@ -43,12 +47,14 @@ export class GpuOps {
   private constructor(
     private readonly device: GPUDevice,
     private readonly layout: GPUBindGroupLayout,
-    private readonly pipelines: Record<Entry, GPUComputePipeline>,
+    private readonly pipelines: Partial<Record<Entry, GPUComputePipeline>>,
     // One distinct dummy per slot — WebGPU forbids binding the same buffer to
     // two writable-storage bindings in a bind group (aliasing).
     private readonly dummies: GPUBuffer[],
     // Pool for per-step scratch buffers.
     readonly pool: BufferPool,
+    /** True iff the device gave us subgroups (train_sg.wgsl pipelines exist). */
+    readonly hasSubgroups: boolean,
   ) {}
 
   /** Start recording a batch of dispatches into a single command buffer. */
@@ -93,19 +99,33 @@ export class GpuOps {
     });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
 
-    const pipelines = {} as Record<Entry, GPUComputePipeline>;
+    const pipelines: Partial<Record<Entry, GPUComputePipeline>> = {};
     for (const entryPoint of ENTRIES) {
       pipelines[entryPoint] = device.createComputePipeline({
         layout: pipelineLayout,
         compute: { module, entryPoint },
       });
     }
+
+    // Subgroup-using variants compiled separately — train_sg.wgsl uses
+    // `enable subgroups;` which only validates on devices that advertise
+    // the feature. Skip compilation entirely otherwise.
+    if (ctx.subgroups) {
+      const sgModule = device.createShaderModule({ code: sgShader });
+      for (const sgEntry of SG_ENTRIES) {
+        pipelines[sgEntry] = device.createComputePipeline({
+          layout: pipelineLayout,
+          compute: { module: sgModule, entryPoint: sgEntry },
+        });
+      }
+    }
+
     // A distinct 1-element buffer for each slot a kernel leaves unused.
     const dummies: GPUBuffer[] = [];
     for (let i = 0; i < 6; i++) {
       dummies.push(device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE }));
     }
-    return new GpuOps(device, layout, pipelines, dummies, new BufferPool(device));
+    return new GpuOps(device, layout, pipelines, dummies, new BufferPool(device), ctx.subgroups);
   }
 
   private newTensor(size: number, label: string): GpuTensor {
@@ -159,7 +179,9 @@ export class GpuOps {
     const bind = this.device.createBindGroup({ layout: this.layout, entries });
 
     const pass = this.pass as GPUComputePassEncoder;
-    pass.setPipeline(this.pipelines[entry]);
+    const pipeline = this.pipelines[entry];
+    if (!pipeline) throw new Error(`pipeline missing for ${entry} (subgroups not available?)`);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, bind);
     pass.dispatchWorkgroups(wgX, wgY);
 
@@ -258,8 +280,17 @@ export class GpuOps {
     const y = this.newTensor(N * D, "ln.y");
     const mean = this.newTensor(N, "ln.mean");
     const rstd = this.newTensor(N, "ln.rstd");
-    this.dispatch("layernorm_forward", [x, gamma, beta, y, mean, rstd],
-      { a: N, b: D, fa: eps }, Math.ceil(N / 64));
+    // Prefer the subgroup-cooperative variant when the device offers it.
+    // The SG kernel runs one workgroup per row (vs one thread per row in the
+    // base kernel) and uses subgroupAdd for the reductions — big win at
+    // d_model ≥ 256 where the serial scan dominates.
+    if (this.hasSubgroups) {
+      this.dispatch("layernorm_forward_sg", [x, gamma, beta, y, mean, rstd],
+        { a: N, b: D, fa: eps }, N);
+    } else {
+      this.dispatch("layernorm_forward", [x, gamma, beta, y, mean, rstd],
+        { a: N, b: D, fa: eps }, Math.ceil(N / 64));
+    }
     return { y, mean, rstd };
   }
 
@@ -347,8 +378,13 @@ export class GpuOps {
   ): { dlogits: GpuTensor; loss: GpuTensor } {
     const dlogits = this.newTensor(N * V, "ce.dlogits");
     const loss = this.newTensor(N, "ce.loss");
-    this.dispatch("cross_entropy", [logits, targets, dlogits, loss],
-      { a: N, b: V }, Math.ceil(N / 64));
+    if (this.hasSubgroups) {
+      this.dispatch("cross_entropy_sg", [logits, targets, dlogits, loss],
+        { a: N, b: V }, N);
+    } else {
+      this.dispatch("cross_entropy", [logits, targets, dlogits, loss],
+        { a: N, b: V }, Math.ceil(N / 64));
+    }
     return { dlogits, loss };
   }
 

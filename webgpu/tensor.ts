@@ -14,6 +14,10 @@
 
 export interface GpuContext {
   device: GPUDevice;
+  /** True iff the device has the `subgroups` feature — lets layernorm /
+   * softmax / cross-entropy kernels use subgroup intrinsics instead of
+   * shared-memory reductions. Chrome 125+. */
+  subgroups: boolean;
 }
 
 /** Request a WebGPU device, or null if the browser/platform has none. */
@@ -22,7 +26,12 @@ export async function createGpuContext(): Promise<GpuContext | null> {
   try {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) return null;
-    return { device: await adapter.requestDevice() };
+    // Ask for subgroups optionally — fall back silently if unavailable.
+    const hasSubgroups = adapter.features.has("subgroups" as GPUFeatureName);
+    const device = await adapter.requestDevice({
+      requiredFeatures: hasSubgroups ? (["subgroups" as GPUFeatureName]) : [],
+    });
+    return { device, subgroups: hasSubgroups };
   } catch {
     return null;
   }
