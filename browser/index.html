@@ -530,9 +530,9 @@
       .screen[hidden] { display: none; }
 
       /* When on the Watch screen, hide the secondary reference content
-         (machine panel, fine-tuning, resources, diagnostics) so the user
-         can focus on the loss curve + sample. The footer meta stays.
-         Click the Setup tab to bring them back. */
+         (machine panel, resources, diagnostics) so the user can focus on
+         the loss curve + sample. The footer meta stays. Click the Setup
+         tab to bring them back. */
       .screens[data-active="watch"] ~ .machine-card,
       .screens[data-active="watch"] ~ .machine-personalise,
       .screens[data-active="watch"] ~ .intro-card,
@@ -1909,7 +1909,7 @@
         background: var(--line);
       }
 
-      /* Collapsible reference cards (Fine-tuning, Resources, More) */
+      /* Collapsible reference cards (Resources, Diagnostics) */
       .card.collapsible {
         padding: 0;
         background: var(--panel);
@@ -2625,51 +2625,11 @@ The goal here is understanding, not a clever model. If you build it yourself, by
         <span>Want to go further?</span>
       </div>
 
-      <!-- Fine-tuning -->
-      <details class="card collapsible" style="margin-top: 0">
-        <summary>
-          <span class="card-title summary-title">
-            <span class="num">4</span> Fine-tuning
-            <span class="summary-sub">LoRA — teach a trained model new tricks without retraining</span>
-          </span>
-          <span class="chevron" aria-hidden="true">▸</span>
-        </summary>
-        <p class="card-prose">
-          <strong>LoRA</strong> takes an already-trained model, <em>freezes</em>
-          every weight, and inserts tiny trainable matrices into a few attention
-          layers. You only ever train those small adapters — typically 1–10% of
-          the base model's size — so one base model can have many swappable
-          personalities at almost no extra disk cost.
-        </p>
-        <p class="card-prose">
-          The browser playground doesn't carry the adapter math; the Python
-          reference does. Same model, same shape, three commands:
-        </p>
-        <pre><code># 1. Train a base model (Python — anywhere)
-python python_ref/train.py \
-    --data your-base-text.txt --out checkpoints/base
-
-# 2. LoRA fine-tune onto a new corpus
-python python_ref/lora.py --base checkpoints/base \
-    --data your-new-text.txt --out checkpoints/adapter
-
-# 3. Compare base vs base + adapter
-python python_ref/lora.py --base checkpoints/base \
-    --adapter checkpoints/adapter --compare --prompt "Once "</code></pre>
-        <p class="card-prose card-note">
-          Practical rules of thumb from the project's own
-          <a href="https://github.com/sarthakagrawal927/tinygpt/blob/main/docs/lora_guide.md" target="_blank" rel="noopener">LoRA guide</a>:
-          start with rank 4, alpha 8, target <code>q_proj</code> + <code>v_proj</code> only,
-          and aim for <strong>300–1,000 clean examples</strong> from one consistent
-          source. One author with 200 clean posts beats 2,000 mixed posts every time.
-        </p>
-      </details>
-
       <!-- Resources -->
-      <details class="card collapsible resources" style="margin-top: 18px">
+      <details class="card collapsible resources" style="margin-top: 0">
         <summary>
           <span class="card-title summary-title">
-            <span class="num">5</span> Resources
+            <span class="num">4</span> Resources
             <span class="summary-sub">curated rabbit holes — 3Blue1Brown, Karpathy, papers, and this repo's own docs</span>
           </span>
           <span class="chevron" aria-hidden="true">▸</span>
@@ -2720,7 +2680,7 @@ python python_ref/lora.py --base checkpoints/base \
       <details class="card collapsible" id="sec-diagnostics" style="margin-top: 18px">
         <summary>
           <span class="card-title summary-title">
-            <span class="num">6</span> Diagnostics &amp; how to go faster
+            <span class="num">5</span> Diagnostics &amp; how to go faster
             <span class="summary-sub">WebGPU matmul benchmark, the Python CLI for 10M+ models, and what makes training fast</span>
           </span>
           <span class="chevron" aria-hidden="true">▸</span>
