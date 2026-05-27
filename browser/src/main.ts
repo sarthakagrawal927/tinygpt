@@ -2541,6 +2541,13 @@ function setupScreens(): void {
 
   // Expose enableWatch globally so other code paths can call it.
   (window as unknown as { __tgEnableWatch?: () => void }).__tgEnableWatch = enableWatch;
+  // Expose a one-shot "switch to Watch screen" too — used by the demo banner
+  // so loading the pretrained model takes the user straight to the Generate
+  // button instead of leaving them on Setup wondering where it went.
+  (window as unknown as { __tgGoToWatch?: () => void }).__tgGoToWatch = () => {
+    enableWatch();
+    setActive("watch");
+  };
 }
 
 // --- system pressure indicator --------------------------------------------
@@ -2617,6 +2624,17 @@ async function setupDemoBanner(): Promise<void> {
       const file = new File([blob], "demo.tinygpt", { type: "application/octet-stream" });
       await loadModelFromFile(file, "pre-trained Shakespeare demo");
       banner.hidden = true;
+      // Take the user straight to the Watch & sample screen — that's where
+      // the Generate button lives. Otherwise they'd land back on Setup
+      // looking for "what now?". Defer one tick to let any final post-load
+      // state messages settle.
+      setTimeout(() => {
+        (window as unknown as { __tgGoToWatch?: () => void }).__tgGoToWatch?.();
+        // Focus the Generate button so a keyboard-first user can hit Enter
+        // immediately. Visually highlight too.
+        const sample = document.getElementById("sample") as HTMLButtonElement | null;
+        if (sample && !sample.disabled) sample.focus();
+      }, 50);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       btn.classList.remove("loading");
