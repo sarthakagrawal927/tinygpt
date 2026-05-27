@@ -628,7 +628,12 @@ els.start.addEventListener("click", () => {
   // Hide any prior run's live-sample card; the worker will reveal it on the
   // first progress_sample of the new run.
   { const liveCard = document.getElementById("liveSampleCard"); if (liveCard) liveCard.hidden = true; }
-  els.sample.disabled = false;
+  // Keep Sample disabled DURING training: the live-sample card auto-samples
+  // every ~8% of steps so the user can watch output evolve mid-run, and the
+  // manual button is re-enabled after the worker's post-training warmup
+  // (case "done" below) so its first click hits pre-compiled inference
+  // pipelines instead of paying 10–30s of WGSL compile cost.
+  els.sample.disabled = true;
   lastConfig = readConfig();
   trackTrainStarted({
     preset: els.sizePreset.value,
@@ -722,6 +727,13 @@ if (copyBtn) {
 // lazily by setupDefaultCorpus() at init time and cached in defaultCorpus.
 let defaultCorpus = "";
 function getResetCorpus(): string { return defaultCorpus; }
+
+// Top-level reset button (next to Start/Pause/Stop) delegates to the same
+// handler as the Model ▾ → Reset menu item — single source of reset logic.
+{
+  const topReset = document.getElementById("resetTop");
+  if (topReset) topReset.addEventListener("click", () => document.getElementById("reset")?.click());
+}
 
 byId<HTMLButtonElement>("reset").addEventListener("click", () => {
   const hasModel = latestState !== null;
@@ -986,8 +998,8 @@ function refreshSampleNote(): void {
     `<span style="color: var(--faint); font-size: 12.5px;">` +
     `For genuinely grammatical English you need at least val loss ~1.5 — roughly ` +
     `Medium/Large preset on a real dataset (TinyStories, Tiny Shakespeare). ` +
-    `For coherent prose: 10M+ params on MB of text via the ` +
-    `<a href="#sec-diagnostics">Python CLI</a>.` +
+    `For coherent prose: 10M+ params on MB of text via ` +
+    `<a href="https://github.com/sarthakagrawal927/tinygpt/blob/main/python_ref/train.py" target="_blank" rel="noopener">the Python reference</a>.` +
     `</span>`;
 }
 
@@ -2169,6 +2181,10 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
     case "done": {
       setRunning(false);
       stopElapsedClock();
+      // Re-enable the Generate button: by this point the worker has finished
+      // both training and the post-training inference-pipeline warmup, so
+      // the first click won't pay the 10–30s WGSL compile cost.
+      els.sample.disabled = false;
       const totalSec = (performance.now() - runStartTime) / 1000;
       const elapsedStr = formatElapsed(totalSec);
       els.stElapsed.textContent = elapsedStr;

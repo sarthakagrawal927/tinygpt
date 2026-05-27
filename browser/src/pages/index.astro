@@ -93,9 +93,23 @@ const pageStyle = `
         .tab-bar { padding: 0 4px; }
         .tab-btn { padding: 10px 11px; font-size: 12px; }
         .tab-body { padding: 12px 14px; }
-        .first-run-toast { left: 16px; right: 16px; transform: none; max-width: none; }
-        .first-run-toast.dismissing,
-        .first-run-toast { animation-name: first-run-mobile-in; }
+        .first-run-toast {
+          left: 16px; right: 16px; bottom: 16px;
+          transform: none; max-width: none;
+          flex-wrap: wrap;
+          gap: 12px;
+          padding: 14px 16px 16px;
+          animation-name: first-run-mobile-in;
+        }
+        .first-run-toast .first-run-icon { width: 32px; height: 32px; font-size: 16px; }
+        .first-run-toast .first-run-title { font-size: 13.5px; }
+        .first-run-toast .first-run-sub { font-size: 12px; }
+        /* CTA gets its own row, full width, easy thumb-tap target. */
+        .first-run-toast .first-run-cta {
+          flex-basis: 100%;
+          padding: 11px 16px;
+          font-size: 13px;
+        }
         @keyframes first-run-mobile-in {
           from { opacity: 0; transform: translateY(20px); }
           to { opacity: 1; transform: translateY(0); }
@@ -2275,6 +2289,17 @@ const pageStyle = `
         color: var(--accent);
         background: var(--accent-glow);
       }
+      /* Reset button — top-level shortcut to the destructive Reset action
+         that lives in the Model ▾ menu. Lower visual weight than Start
+         (it's destructive), but visible so users don't have to dig. */
+      .reset-top {
+        color: var(--muted);
+      }
+      .reset-top:hover {
+        color: var(--warn);
+        border-color: var(--warn);
+        background: rgba(245, 177, 74, 0.06);
+      }
       .footer-meta {
         color: var(--faint);
         font: 500 12.5px/1.5 var(--font-mono);
@@ -2587,22 +2612,13 @@ const pageBody = `
            from the first paint — no late-injected layout shift. -->
       <aside id="introCard" class="intro-card">
         <button id="introDismiss" class="intro-dismiss" type="button" aria-label="Dismiss intro">×</button>
-        <h2 class="intro-title">What is this?</h2>
         <p>
-          A <em>language model</em> — the same kind of system as ChatGPT, but
-          a million times smaller and trained right here in your browser
-          tab, not on a datacenter somewhere. Click <strong>Load pretrained
-          model</strong> below to see one we trained earlier; click
-          <strong>Start training</strong> to teach a fresh one in a few
-          minutes on whatever text you give it.
-        </p>
-        <p class="intro-why">
-          <strong>Why it matters:</strong> modern AI runs on a stack so deep
-          that "training a model" sounds like magic. This shows the whole
-          stack — every line of math is in the
-          <a href="https://github.com/sarthakagrawal927/tinygpt" target="_blank" rel="noopener">source</a>,
-          every kernel is tested, every speedup is measured. It demystifies
-          the technology one button-click at a time.
+          <strong>What is this?</strong> A tiny GPT — same architecture as
+          ChatGPT, a million times smaller, trained right here in your
+          browser. <em>Load pretrained</em> to see one we trained earlier,
+          or <em>Start training</em> to teach a fresh one in a few minutes.
+          Every line of math is in the
+          <a href="https://github.com/sarthakagrawal927/tinygpt" target="_blank" rel="noopener">source</a>.
         </p>
       </aside>
 
@@ -2621,13 +2637,8 @@ const pageBody = `
 
       <div id="demoBanner" class="demo-banner" hidden>
         <div class="demo-banner-body">
-          <strong>Two ways to see this work:</strong>
-          <span>
-            <em>Skip ahead</em> — load a 9.6M-param Shakespeare model we trained earlier (train loss 1.22)
-            and hit <kbd>Generate</kbd>. Real words, sentences with Shakespearean structure, character labels.
-            Shipped as a quantized fp16 checkpoint so the download stays small (~18 MB).
-            Or <em>train your own from scratch</em> in your browser (~4–15 min depending on preset) using the controls below.
-          </span>
+          <strong>Two ways:</strong>
+          <span>load a 9.6M-param Shakespeare model (train loss 1.22, ~18&nbsp;MB) and hit Generate, or train your own from scratch using the controls below (~4–15&nbsp;min).</span>
         </div>
         <button id="loadDemoBtn" class="primary-btn demo-load-btn" type="button">
           <span aria-hidden="true">▶</span> Load pretrained model
@@ -2837,6 +2848,7 @@ const pageBody = `
             <button id="start" class="primary">Start training</button>
             <button id="pause" class="secondary" disabled>Pause</button>
             <button id="stop" class="secondary" disabled>Stop</button>
+            <button id="resetTop" class="ghost-btn reset-top" type="button" title="Clear corpus, config, and trained model (same as Model → Reset)">↺ Reset</button>
             <div class="model-menu">
               <button id="modelMenuBtn" class="secondary" type="button" aria-haspopup="menu" aria-expanded="false">
                 Model <span class="chev-down" aria-hidden="true">▾</span>

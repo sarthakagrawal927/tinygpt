@@ -8,6 +8,11 @@
 import { chromium } from "playwright";
 
 const SITE = process.env.E2E_URL || "https://tinygpt.sarthakagrawal.dev";
+// E2E_VIEWPORT=mobile runs at iPhone-14-ish dimensions to catch responsive
+// breakage. Default is desktop (1400x900) for full-fidelity tests.
+const VIEWPORT = process.env.E2E_VIEWPORT === "mobile"
+  ? { width: 390, height: 844 }
+  : { width: 1400, height: 900 };
 
 const results = [];
 const ok = (n, msg = "") => { results.push({ name: n, ok: true, msg }); console.log(`✅ ${n}${msg ? "  — " + msg : ""}`); };
@@ -17,7 +22,7 @@ const browser = await chromium.launch({
   headless: false,
   args: ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-vulkan"],
 });
-const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 }, acceptDownloads: true });
+const ctx = await browser.newContext({ viewport: VIEWPORT, acceptDownloads: true });
 const page = await ctx.newPage();
 page.on("dialog", (d) => d.accept().catch(() => {}));
 const pageErrors = [];
@@ -25,7 +30,7 @@ const consoleErrors = [];
 page.on("pageerror", (e) => pageErrors.push(e.message));
 page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
 
-console.log(`\n>> E2E ${SITE}\n${"=".repeat(60)}\n`);
+console.log(`\n>> E2E ${SITE}  @ ${VIEWPORT.width}x${VIEWPORT.height}\n${"=".repeat(60)}\n`);
 
 // ----- 1. Initial page load -----
 console.log("PHASE 1 — Initial page load\n");
@@ -46,8 +51,8 @@ const introVisible = await page.locator("#introCard").isVisible().catch(() => fa
 introVisible ? ok("intro card visible on first-visit") : fail("intro card", "not visible");
 
 const introText = await page.locator("#introCard").textContent().catch(() => "");
-if (introText?.includes("What is this?") && introText.includes("language model")) ok("intro copy correct");
-else fail("intro copy", "missing 'What is this?' or 'language model'");
+if (introText?.includes("What is this?") && introText.includes("ChatGPT")) ok("intro copy correct");
+else fail("intro copy", "missing 'What is this?' or 'ChatGPT'");
 
 const bannerVisible = await page.locator("#demoBanner").isVisible().catch(() => false);
 bannerVisible ? ok("demo banner visible") : fail("demo banner", "not visible");
