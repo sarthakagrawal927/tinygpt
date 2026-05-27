@@ -1,0 +1,223 @@
+---
+/**
+ * DocLayout.astro — shared shell for rendered markdown docs.
+ *
+ * Used by the pages under /docs/. Wraps imported markdown with the site's
+ * dark theme + prose typography. The source markdown lives one level up in
+ * `tinygpt/docs/` (so GitHub renders the same content); these pages just
+ * import + render via Astro's built-in markdown handling.
+ */
+import Default from "./Default.astro";
+
+export interface Props {
+  title: string;
+  description: string;
+  sourcePath: string;  // e.g. "docs/lessons.md" — shown + linked to GitHub
+}
+
+const { title, description, sourcePath } = Astro.props;
+const githubUrl = `https://github.com/sarthakagrawal927/tinygpt/blob/main/${sourcePath}`;
+
+const layoutProps = {
+  title: `TinyGPT — ${title}`,
+  description,
+  ogType: "article" as const,
+  ogTitle: `TinyGPT — ${title}`,
+  ogDescription: description,
+  themeColor: "#0a0c10",
+  loadFonts: true,
+};
+
+const style = `
+  :root {
+    --bg: #0a0c10;
+    --panel: #11141a;
+    --line: #232733;
+    --fg: #e7e8ea;
+    --muted: #c8cbd4;
+    --faint: #787d88;
+    --accent: #48e5c2;
+    --accent-dim: #2a8a78;
+    --accent-glow: rgba(72, 229, 194, 0.18);
+    --warn: #f5b14a;
+    --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", monospace;
+  }
+  html, body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.7 var(--font-sans);
+    margin: 0; padding: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  .doc-wrap { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  .eyebrow {
+    font: 500 11px/1 var(--font-mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 14px;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  .eyebrow a { color: var(--accent); text-decoration: none; border-bottom: 1px dashed transparent; transition: border-color 0.2s; }
+  .eyebrow a:hover { border-bottom-color: var(--accent); }
+  .eyebrow .sep { color: var(--faint); }
+
+  .doc-source {
+    margin-bottom: 28px;
+    font: 11.5px/1.5 var(--font-mono);
+    color: var(--faint);
+    display: flex; gap: 10px; align-items: center;
+  }
+  .doc-source code {
+    background: rgba(72, 229, 194, 0.04);
+    border: 1px solid var(--line);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--muted);
+  }
+  .doc-source a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--accent-dim);
+  }
+  .doc-source a:hover { border-bottom-color: var(--accent); }
+
+  .prose h1 {
+    font: 600 32px/1.2 var(--font-sans);
+    color: var(--fg);
+    margin: 0 0 28px;
+    letter-spacing: -0.01em;
+  }
+  .prose h2 {
+    font: 600 22px/1.3 var(--font-sans);
+    color: var(--fg);
+    margin: 44px 0 16px;
+    letter-spacing: -0.005em;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .prose h2:first-of-type { border-top: none; padding-top: 0; }
+  .prose h3 {
+    font: 600 17px/1.4 var(--font-sans);
+    color: var(--fg);
+    margin: 32px 0 12px;
+  }
+  .prose h4 {
+    font: 600 15px/1.4 var(--font-sans);
+    color: var(--muted);
+    margin: 24px 0 8px;
+  }
+  .prose p { color: var(--muted); margin: 0 0 16px; }
+  .prose strong { color: var(--fg); font-weight: 600; }
+  .prose em { color: var(--muted); font-style: italic; }
+
+  .prose a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--accent-dim);
+    transition: border-color 0.15s;
+  }
+  .prose a:hover { border-bottom-color: var(--accent); }
+
+  .prose code {
+    font: 13.5px/1.5 var(--font-mono);
+    background: rgba(72, 229, 194, 0.05);
+    border: 1px solid var(--line);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--muted);
+  }
+  .prose pre {
+    background: #0c0f15;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    margin: 18px 0;
+    font: 13px/1.55 var(--font-mono);
+  }
+  .prose pre code {
+    background: none; border: none; padding: 0; border-radius: 0;
+    color: var(--muted);
+    font-size: inherit;
+  }
+
+  .prose ul, .prose ol { color: var(--muted); padding-left: 24px; margin: 12px 0 18px; }
+  .prose li { margin-bottom: 6px; }
+  .prose li::marker { color: var(--faint); }
+
+  .prose blockquote {
+    border-left: 2px solid var(--accent-dim);
+    background: rgba(72, 229, 194, 0.04);
+    margin: 18px 0;
+    padding: 12px 18px;
+    color: var(--muted);
+    border-radius: 0 6px 6px 0;
+  }
+  .prose blockquote p { margin: 0 0 8px; }
+  .prose blockquote p:last-child { margin-bottom: 0; }
+
+  .prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 18px 0;
+    font-size: 14px;
+  }
+  .prose th, .prose td {
+    border-bottom: 1px solid var(--line);
+    padding: 8px 12px;
+    text-align: left;
+  }
+  .prose th { color: var(--fg); font-weight: 500; background: rgba(72, 229, 194, 0.03); }
+  .prose td { color: var(--muted); }
+
+  .prose hr { border: none; border-top: 1px solid var(--line); margin: 36px 0; }
+
+  .doc-footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    font: 13px/1.6 var(--font-mono);
+    color: var(--faint);
+    display: flex; flex-wrap: wrap; gap: 12px;
+  }
+  .doc-footer a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--accent-dim);
+  }
+  .doc-footer a:hover { border-bottom-color: var(--accent); }
+  .doc-footer .sep { color: var(--faint); }
+`;
+---
+
+<Default {...layoutProps}>
+  <style is:global slot="head" set:html={style}></style>
+  <div class="doc-wrap">
+    <div class="eyebrow">
+      <a href="/">← TinyGPT</a>
+      <span class="sep">·</span>
+      <a href="/docs/">docs</a>
+      <span class="sep">·</span>
+      <a href="/devlog">devlog</a>
+      <span class="sep">·</span>
+      <a href="/roadmap">roadmap</a>
+      <span class="sep">·</span>
+      <a href="/speedup">speedup</a>
+    </div>
+    <div class="doc-source">
+      source: <code>{sourcePath}</code> · <a href={githubUrl} target="_blank" rel="noopener">view on GitHub ↗</a>
+    </div>
+    <article class="prose">
+      <slot />
+    </article>
+    <footer class="doc-footer">
+      <span>TinyGPT</span>
+      <span class="sep">·</span>
+      <a href="https://github.com/sarthakagrawal927/tinygpt">repo ↗</a>
+      <span class="sep">·</span>
+      <a href="/docs/">other docs</a>
+    </footer>
+  </div>
+</Default>
