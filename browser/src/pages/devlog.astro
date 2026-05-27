@@ -380,33 +380,76 @@ size 2048:  blocked4 10.15 ms vs blocked8 11.52 ms (0.88×)</pre>
       </p>
 
       <!-- ================================================================ -->
-      <h2>What's next — pipeline of remaining wins <span class="tag">projected</span></h2>
+      <h2>The lever that actually shipped — Flash Attention 2 <span class="tag">measured win</span></h2>
 
       <p>
-        Honest read on diminishing returns. Most of the easy wins are done. What's left:
+        This was originally the headline entry in the "what's next" list. It
+        moved up over the course of two sessions.
+      </p>
+
+      <div class="block win">
+        <p>
+          <strong>Forward</strong> — workgroup-cooperative tiling. One workgroup
+          per <code>(batch, head, Q-tile of 16 rows)</code>; K and V walked in
+          blocks of 16; the online-softmax state (<em>m</em>, <em>l</em>,
+          <em>O</em>) stays in registers across K blocks. Per-thread private
+          memory drops from <code>array&lt;f32, 1024&gt;</code> (the FA1-style
+          fallback) to <code>1 + 1 + hd</code> floats — ≤ 66 at <code>hd=64</code>,
+          well inside the register file. Default attention path for every preset
+          up to Behemoth.
+        </p>
+        <p>
+          <strong>Backward</strong> — recomputes attention on the fly from
+          <code>q</code>, <code>k</code>, and a saved log-sum-exp
+          <code>L = m + log(l)</code> per Q row. Two new kernels
+          (<code>attn_dscores_fa2</code> + <code>attn_dv_fa2</code>) replace the
+          ones that previously read the cached attn matrix.
+        </p>
+        <p>
+          <strong>The real memory win:</strong> with backward no longer reading
+          the cached attn matrix, the forward dropped its second-pass writeback
+          entirely. At Mega-class shapes (B=4, H=8, T=512) that's about 67 MB of
+          global memory traffic per layer per step that now stays on-chip.
+        </p>
+        <pre>WASM SIMD          6.8 s   loss 2.9385
+WebGPU + FA2 fwd
+       + FA2 back   0.7 s   loss 2.8650   2.5% drift</pre>
+      </div>
+
+      <div class="block lesson">
+        <p>
+          <strong>Lesson learned, definitively this time:</strong> the
+          algorithm-in-JS-first habit. Both halves of FA2 (forward and
+          backward) were pinned in a Node parity test against a naive
+          reference <em>before</em> any WGSL got written. That made each
+          shader "transcribe the proven algorithm" rather than "debug from a
+          wall of NaN." Without the JS reference I'd have been chasing
+          register-spill bugs that the math itself would never have caused.
+          Worth keeping a separate Node-side parity test for every future
+          kernel that does anything non-trivial.
+        </p>
+      </div>
+
+      <!-- ================================================================ -->
+      <h2>What's next — what genuinely remains <span class="tag">projected</span></h2>
+
+      <p>
+        Most of the speed work is done. Two real threads left:
       </p>
 
       <ul>
         <li>
-          <strong>Full Flash Attention 2</strong> — workgroup-cooperative attention with
-          tiling and backward recomputation. Biggest remaining lever, especially at
-          ctx ≥ 256 (Mega/Behemoth presets). Multi-day rewrite — easy to get the
-          backward subtly wrong.
+          <strong>Pre-trained model gallery</strong> — Cloudflare R2-hosted;
+          manifest-driven UI; lets visitors load and continue-train from real
+          checkpoints instead of just the one shipped demo. Deferred until the
+          speed work was fully shipped so the gallery's implicit "you can train
+          these too" promise stays honest. That bar is met now.
         </li>
         <li>
-          <strong>Operator fusion</strong> — residual-add + layernorm forward can fuse
-          into one kernel, saving a global round-trip.
-        </li>
-        <li>
-          <strong>Pre-trained model gallery</strong> — Cloudflare R2-hosted; manifest-driven
-          UI; lets visitors load and continue-train from real checkpoints instead of just
-          the one shipped demo. Deferred until the speed work is fully shipped so the
-          gallery's implicit "you can train these too" promise is honest.
-        </li>
-        <li>
-          <strong>Native macOS app</strong> — MLX-Swift + SwiftUI, mirrors the playground
-          but lifts the model-size ceiling into the 7B–30B range on Apple Silicon. Same
-          <code>.tinygpt</code> file format both ways. Future work.
+          <strong>Native macOS app</strong> — MLX-Swift + SwiftUI, mirrors the
+          playground but lifts the model-size ceiling into the 7B–30B range on
+          Apple Silicon. Same <code>.tinygpt</code> file format both ways. The
+          biggest single new project that could grow out of this one.
         </li>
       </ul>
 

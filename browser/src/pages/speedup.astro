@@ -223,7 +223,7 @@ const pageBody = `
           <div class="ms">6.8 s<small>per step</small></div>
         </div>
         <div class="headline-bars">
-          <div class="label">WebGPU + this work<small>blocked4 + subgroups + fused attn + Memory64</small></div>
+          <div class="label">WebGPU + this work<small>blocked4 + subgroups + FA2 fwd&nbsp;+&nbsp;bwd + Memory64</small></div>
           <div class="bar after" style="width: 10.3%"></div>
           <div class="ms">0.7 s<small>per step</small></div>
         </div>
@@ -287,10 +287,10 @@ const pageBody = `
           <div class="tag">projected</div>
         </div>
         <div class="stack-row">
-          <div class="lbl">+ Flash Attention 2</div>
-          <div class="stack-bar projected" style="width: 100%"></div>
-          <div class="val">~70×</div>
-          <div class="tag">projected</div>
+          <div class="lbl">+ Flash Attention 2 (fwd + bwd)</div>
+          <div class="stack-bar measured" style="width: 80%"></div>
+          <div class="val">~50×</div>
+          <div class="tag m">shipped</div>
         </div>
       </div>
 

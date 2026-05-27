@@ -497,10 +497,10 @@ const pageBody = `
               <span class="evo-tag">projected</span>
             </div>
             <div class="evo-row">
-              <span class="evo-label">+ Flash Attention 2 (ctx 512)</span>
-              <span class="evo-bar planned" style="--w: 100%"></span>
-              <span class="evo-val">~60–80×</span>
-              <span class="evo-tag">projected</span>
+              <span class="evo-label">+ Flash Attention 2 (fwd + bwd)</span>
+              <span class="evo-bar shipped" style="--w: 80%"></span>
+              <span class="evo-val">~50×</span>
+              <span class="evo-tag">shipped · recompute-on-backward, attn writeback dropped</span>
             </div>
           </div>
           <p style="margin-top: 18px; color: var(--muted); font-size: 13.5px;">
@@ -1024,19 +1024,47 @@ const pageBody = `
         <div class="lever-head">
           <span class="lever-num">12</span>
           <h2 class="lever-title">Flash Attention 2 in WGSL</h2>
-          <span class="status planned"><span class="dot"></span> Planned</span>
+          <span class="status shipped"><span class="dot"></span> Shipped — fwd + bwd + writeback dropped</span>
         </div>
         <div class="lever-meta">
-          <span>Impact: <strong>~3–5× on long-context</strong>, O(N) memory</span>
+          <span>Memory saved: <strong>O(B·H·T²)</strong> per layer per step</span>
+          <span>End-to-end drift vs WASM: <strong>2.5%</strong></span>
           <span>Reference: Dao 2023 (FA2)</span>
         </div>
         <div class="lever-body">
           <p>
-            Tile Q, K, V across workgroups; never materialize the full attention
-            matrix; recompute on backward. Today attention is the wall at
-            <code>ctxLen ≥ 512</code>. FA2 makes the 1024-context Behemoth
-            preset realistic in the browser.
+            Workgroup-cooperative forward — one workgroup per
+            <code>(batch, head, Q-tile of 16 rows)</code>, K and V walked in
+            blocks of 16, online softmax in registers across K blocks. Default
+            attention path when <code>hd ≤ 64</code> (every preset up to
+            Behemoth). Lives in <code>webgpu/attention_fa2.wgsl</code>.
           </p>
+          <p>
+            Backward kernels (<code>attn_dscores_fa2</code> +
+            <code>attn_dv_fa2</code>) reconstruct
+            <code>P = exp(S − L)</code> from <code>q</code>/<code>k</code> and
+            the saved log-sum-exp instead of reading the cached attn matrix.
+            That removed the forward's second-pass writeback entirely; on
+            Mega-class shapes (B=4, H=8, T=512) ~67 MB of global memory
+            traffic per layer per step now stays on-chip.
+          </p>
+          <div class="why">
+            <span class="why-key">Verification</span>
+            <span class="why-val">
+              Algorithm parity in Node (<code>tests/test_fa2_parity.mjs</code>
+              + <code>tests/test_fa2_backward_parity.mjs</code>) — 12 forward
+              checks, 18 backward checks, all within 1 ULP. End-to-end via
+              <code>tests/test_webgpu_train.mjs</code>: WASM 6.8 s/step
+              vs WebGPU + FA2 0.7 s/step, 2.5% loss drift after 50 steps.
+            </span>
+          </div>
+          <div class="why">
+            <span class="why-key">Design notes</span>
+            <span class="why-val">
+              <a href="https://github.com/sarthakagrawal927/tinygpt/blob/main/docs/fa2_forward_notes.md">fa2_forward_notes.md</a>
+              · <a href="https://github.com/sarthakagrawal927/tinygpt/blob/main/docs/fa2_backward_notes.md">fa2_backward_notes.md</a>
+            </span>
+          </div>
         </div>
       </article>
 
