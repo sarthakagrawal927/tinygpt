@@ -2474,8 +2474,15 @@ async function init(): Promise<void> {
 
   renderPersonalisation({ caps, hw, rec, browser });
 
-  // Restore the previous run — the loss chart and the trained model — so it
-  // survives a page refresh (milestone 7).
+  // Restore the previous run — loss chart + trained model — so it survives a
+  // page refresh (milestone 7). The chart restore is cheap and fires
+  // immediately; the model state can be huge (10–100 MB) and posting it to a
+  // Worker plus the WASM importState that follows can chew CPU for a couple
+  // seconds. That work used to fire on every page load and felt like the
+  // page was "doing something heavy" (often misread as background training).
+  // Deferred via requestIdleCallback so first paint + first user interaction
+  // are unaffected; the model is ready by the time the user clicks anything
+  // that needs it.
   const prev = await loadRun();
   const prevState = await loadState();
   if (prev && prev.lossHistory.length > 0) {
@@ -2496,8 +2503,13 @@ async function init(): Promise<void> {
     els.downloadModel.disabled = false;
     els.downloadSafetensors.disabled = false;
     els.continueBtn.disabled = false;
-    worker.postMessage({ type: "restore", state: buffer, config: lastConfig }, [buffer]);
-    els.status.textContent = "restoring your last model from storage…";
+    const doRestore = () => {
+      worker.postMessage({ type: "restore", state: buffer, config: lastConfig as RunConfig }, [buffer]);
+      els.status.textContent = "restoring your last model from storage…";
+    };
+    const ric = (globalThis as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void }).requestIdleCallback;
+    if (ric) ric(doRestore, { timeout: 3000 });
+    else setTimeout(doRestore, 1200);
   }
 }
 
