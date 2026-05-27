@@ -78,6 +78,22 @@ const {
     )}
 
     <slot name="head" />
+
+    <!-- Pre-paint layout-shift guard. Reads localStorage SYNCHRONOUSLY before
+         the body parses, and adds classes on <html> that CSS uses to hide
+         elements in their resting state. Without this, hidden-by-default
+         elements (intro card, demo banner) would flash visible after JS ran
+         and shove content below them around on every page load. -->
+    <script is:inline>
+      (function () {
+        try {
+          const html = document.documentElement;
+          if (localStorage.getItem("tinygpt.introDismissed") === "1") {
+            html.classList.add("intro-dismissed");
+          }
+        } catch (_) { /* private mode / disabled storage — accept the one-time shift */ }
+      })();
+    </script>
   </head>
   <body>
     <slot />

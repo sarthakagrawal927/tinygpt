@@ -2737,17 +2737,16 @@ async function setupDemoBanner(): Promise<void> {
 }
 
 // --- intro card (first-visit "what is this") ------------------------------
+// The card's visibility on first paint is decided by an inline script in
+// Default.astro that reads localStorage synchronously and adds an
+// `intro-dismissed` class on <html>. This function only wires the × button.
 function setupIntroCard(): void {
-  const card = document.getElementById("introCard");
   const dismiss = document.getElementById("introDismiss");
-  if (!card || !dismiss) return;
+  if (!dismiss) return;
   const KEY = "tinygpt.introDismissed";
-  let dismissed = false;
-  try { dismissed = localStorage.getItem(KEY) === "1"; } catch {}
-  card.hidden = dismissed;
   dismiss.addEventListener("click", () => {
-    card.hidden = true;
-    try { localStorage.setItem(KEY, "1"); } catch {}
+    document.documentElement.classList.add("intro-dismissed");
+    try { localStorage.setItem(KEY, "1"); } catch { /* private mode */ }
   });
 }
 

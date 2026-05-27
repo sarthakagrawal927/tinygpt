@@ -195,6 +195,10 @@ const pageStyle = `
         animation: rise-in 0.45s var(--ease-out-expo) 0.4s both;
       }
       .intro-card[hidden] { display: none; }
+      /* Pre-paint hide for repeat visitors — set by the inline script in
+         Default.astro that reads localStorage synchronously. Eliminates the
+         flash-of-intro-card on every refresh. */
+      html.intro-dismissed .intro-card { display: none; }
       .intro-title {
         margin: 0 0 10px;
         font: 600 18px/1.3 var(--font-sans);
@@ -1690,47 +1694,11 @@ const pageStyle = `
 
       .brand .spacer { flex: 1; min-width: 12px; }
 
-      /* Intro card — single-sentence "what is this" for first-time visitors */
-      .intro-card {
-        display: flex; align-items: flex-start; gap: 14px;
-        padding: 14px 18px;
-        margin: 16px 0 24px;
-        background: var(--panel-2);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        font-size: 13px;
-        color: var(--muted);
-        animation: rise-in 0.5s var(--ease-out-expo) 0.2s both;
-      }
-      .intro-card[hidden] { display: none; }
-      .intro-icon {
-        color: var(--accent);
-        font-size: 16px;
-        font-family: var(--font-mono);
-        line-height: 1.5;
-      }
-      .intro-text {
-        flex: 1;
-        color: var(--muted);
-        line-height: 1.6;
-      }
-      .intro-text strong { color: var(--fg); font-weight: 500; }
-      .intro-dismiss {
-        flex-shrink: 0;
-        width: 26px; height: 26px;
-        padding: 0;
-        background: transparent;
-        border: 1px solid var(--line-strong);
-        color: var(--faint);
-        border-radius: 50%;
-        font: 500 14px/1 var(--font-sans);
-        cursor: pointer;
-        transition: all 0.15s ease;
-      }
-      .intro-dismiss:hover {
-        color: var(--fg);
-        border-color: var(--muted);
-      }
+      /* (Removed: stale CSS for an earlier single-sentence intro-card design.
+         The current intro-card lives at the top of this stylesheet alongside
+         the demo banner. Dead .intro-icon and .intro-text classes weren't
+         referenced from any markup and were overriding the new design via
+         later cascade order.) */
 
       /* Sticky mini-stats — fixed at top while training, after scroll past chart */
       .sticky-stats {
@@ -2276,11 +2244,26 @@ const pageStyle = `
       }
       .footer-meta {
         color: var(--faint);
-        font-size: 12.5px;
-        display: flex; gap: 14px; flex-wrap: wrap;
+        font: 500 12.5px/1.5 var(--font-mono);
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 24px; flex-wrap: wrap;
+        padding-top: 18px;
+        border-top: 1px solid var(--line);
       }
-      .footer-meta a { color: var(--muted); }
-      .footer-meta a:hover { color: var(--accent); }
+      .footer-meta .brand-line { color: var(--faint); }
+      .footer-meta .footer-links {
+        display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+      }
+      .footer-meta .footer-links a {
+        color: var(--muted);
+        text-decoration: none;
+        transition: color 0.15s;
+      }
+      .footer-meta .footer-links a:hover { color: var(--accent); }
+      @media (max-width: 600px) {
+        .footer-meta { gap: 12px; }
+        .footer-meta .footer-links { gap: 14px; }
+      }
       /* First-completed-run celebration toast */
       .first-run-toast {
         position: fixed;
@@ -2564,10 +2547,12 @@ const pageBody = `
         </p>
       </header>
 
-      <!-- First-visit explainer for non-engineer visitors. Wired by
-           setupIntroCard() in main.ts; remembers dismissal in localStorage,
-           so a repeat visitor sees a clean playground. -->
-      <aside id="introCard" class="intro-card" hidden>
+      <!-- First-visit explainer for non-engineer visitors. Visible by
+           default in markup; hidden via the intro-dismissed class on
+           <html> (set synchronously in the head by an inline script that
+           reads localStorage), so repeat visitors see a clean playground
+           from the first paint — no late-injected layout shift. -->
+      <aside id="introCard" class="intro-card">
         <button id="introDismiss" class="intro-dismiss" type="button" aria-label="Dismiss intro">×</button>
         <h2 class="intro-title">What is this?</h2>
         <p>
@@ -3113,98 +3098,38 @@ const pageBody = `
         </div>
       </details>
 
-      <!-- More: advanced/diagnostic -->
+      <!-- WebGPU live matmul benchmark — kept as a one-button parity demo. -->
       <details class="card collapsible" id="sec-diagnostics" style="margin-top: 18px">
         <summary>
           <span class="card-title summary-title">
-            <span class="num">5</span> Diagnostics &amp; how to go faster
-            <span class="summary-sub">WebGPU matmul benchmark, the Python CLI for 10M+ models, and what makes training fast</span>
+            <span class="num">5</span> WebGPU matmul benchmark
+            <span class="summary-sub">Same matmul on WebGPU + WASM, side-by-side, with a live speedup number</span>
           </span>
           <span class="chevron" aria-hidden="true">▸</span>
         </summary>
-        <div class="speed-levers">
-          <h3>Making it faster — what works, in order of impact</h3>
-          <ol>
-            <li><strong>Train locally with Python (50–100×).</strong> The
-            <code>python_ref/train.py</code> path uses PyTorch with CUDA / Apple MPS
-            and runs on every core. A 10M model trains in ~24 s / 1k steps on an
-            M5 Pro — comfortable iteration speed.</li>
-            <li><strong>WebGPU backend (≈3–10× on real hardware).</strong> The
-            shaders are correct end-to-end (24/24 kernel parity-checked); real-GPU
-            speedup is unmeasured here because the project's CI ran on a software
-            adapter (<code>swiftshader</code>) — see <code>docs/notes.md §10</code>.
-            Try it on your machine and watch tokens/sec.</li>
-            <li><strong>WASM SIMD (1.6× over scalar WASM).</strong> Already on if
-            your browser supports it — the green pill at top confirms. Four floats
-            per cycle in the matmul inner loop instead of one.</li>
-            <li><strong>Bigger batch (sub-linear).</strong> Better cache utilisation
-            per step, fewer kernel dispatches. Memory grows linearly in batch ×
-            ctx; the matmul cost dominates so it's near-free up to your RAM limit.</li>
-            <li><strong>Smaller model (linear).</strong> Throughput scales roughly
-            as 1/params for transformer training, because the matmuls grow as
-            params × batch × ctx. Drop d_model from 96 to 48 and per-step time
-            quarters (d² in the inner kernel).</li>
-            <li><strong>Multi-threaded WASM (4–8×, not implemented here).</strong>
-            Would need <code>SharedArrayBuffer</code> and worker threads. Open box.</li>
-          </ol>
-          <p class="speed-note">
-            Full speed write-up:
-            <a href="https://github.com/sarthakagrawal927/tinygpt/blob/main/docs/performance.md" target="_blank" rel="noopener">docs/performance.md ↗</a>
-            · The journey of every lever — shipped, blocked, open, and why:
-            <a href="/roadmap">the performance journey ↗</a>
-          </p>
-        </div>
-
-        <div style="margin-top: 14px">
-          <p style="margin: 0 0 10px; color: var(--muted); font-size: 13px">
-            Runs the same matmul on the WebGPU compute kernel and the WASM kernel,
-            checks they agree, and reports the speedup. Needs Chrome / Edge 113+.
+        <div style="margin-top: 6px">
+          <p style="margin: 0 0 12px; color: var(--muted); font-size: 13.5px; line-height: 1.6;">
+            Runs the same matmul through the WebGPU compute kernel and the
+            WASM kernel, parity-checks they agree, and reports the per-shape
+            speedup on your hardware. Needs Chrome / Edge 113+. For the
+            full end-to-end speedup curve across the preset table, see
+            <a href="/speedup">/speedup</a>.
           </p>
           <button id="bench" class="secondary">Run WebGPU benchmark</button>
-          <div id="benchOut">Not run yet.</div>
-        </div>
-
-        <div style="margin-top: 22px">
-          <h3 style="font: 500 13px/1 var(--font-sans); margin: 0 0 8px; color: var(--fg)">
-            Train larger models locally
-          </h3>
-          <p style="margin: 0; color: var(--muted); font-size: 13px">
-            In-browser is single-threaded WASM — comfortable up to ~1M params. For
-            5–25M+ (a few minutes on a laptop), run the Python reference where it
-            uses your GPU (Apple MPS / CUDA).
-          </p>
-          <pre><code>git clone https://github.com/sarthakagrawal927/tinygpt
-cd tinygpt
-python -m venv python_ref/.venv &amp;&amp; source python_ref/.venv/bin/activate
-pip install -r python_ref/requirements.txt
-
-# measure how fast your machine trains:
-python python_ref/bench.py
-
-# train a ~10.8M model on your own text:
-python python_ref/train.py --model-config configs/model.small.json \\
-    --data your-text.txt --out checkpoints/run
-
-# generate from it:
-python python_ref/sample.py --checkpoint checkpoints/run --prompt "Once "</code></pre>
+          <div id="benchOut" style="margin-top: 10px">Not run yet.</div>
         </div>
       </details>
 
       <footer class="notes">
         <div class="footer-meta">
-          <span>byte-level transformer · no autograd anywhere · 360k–470M param range</span>
-          <span>·</span>
-          <a href="https://github.com/sarthakagrawal927/tinygpt">GitHub ↗</a>
-          <span>·</span>
-          <a href="/speedup">Speedup curve ↗</a>
-          <span>·</span>
-          <a href="/roadmap">Performance journey ↗</a>
-          <span>·</span>
-          <a href="/devlog">Devlog ↗</a>
-          <span>·</span>
-          <a href="/docs">Docs library ↗</a>
-          <span>·</span>
-          <a href="/webgpu-test">WebGPU kernel parity test ↗</a>
+          <span class="brand-line">TinyGPT — byte-level transformer trained in a browser tab</span>
+          <nav class="footer-links" aria-label="Site sections">
+            <a href="/docs">Docs</a>
+            <a href="/speedup">Speedup</a>
+            <a href="/roadmap">Roadmap</a>
+            <a href="/devlog">Devlog</a>
+            <a href="https://github.com/sarthakagrawal927/tinygpt">GitHub ↗</a>
+          </nav>
         </div>
       </footer>
 
