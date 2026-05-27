@@ -1199,21 +1199,78 @@ const pageBody = `
             hours to train and is verified before it goes in the gallery.
             Storage is essentially free (R2: ≈ $0.015/GB-month, no egress
             fees to Pages); the gating cost is just compute time, which is
-            cheap at this scale.
+            cheap at this scale. Pairs naturally with lever 18 (diverse data
+            structures) — each gallery entry demonstrates a different kind
+            of structure the same architecture can pick up.
           </p>
         </div>
       </article>
 
-      <!-- 18: Quantization + LoRA fine-tuning — bundled, lands with Mac app -->
-      <article id="quant-lora" class="lever">
+      <!-- 18: Diverse data structures — content variety -->
+      <article id="diverse-data" class="lever">
         <div class="lever-head">
           <span class="lever-num">18</span>
+          <h2 class="lever-title">Diverse data structures — tables, songs, books, code</h2>
+          <span class="status planned"><span class="dot"></span> Planned</span>
+        </div>
+        <div class="lever-meta">
+          <span>Impact: <strong>shows the architecture learning structure, not just words</strong></span>
+          <span>Pairs with the gallery</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            The playground accepts any UTF-8 text today, but the bundled demo
+            and most curated corpora are English prose. What the architecture
+            can <em>actually</em> learn isn't just language — it's any pattern
+            with local + long-range structure. Worth demonstrating with a
+            handful of materially different source types:
+          </p>
+          <ul>
+            <li>
+              <strong>Tabular data (CSV / Excel-exported sheets).</strong> The
+              model learns the row/column rhythm — commas and newlines in the
+              right places, repeated header tokens, value-range patterns per
+              column.
+            </li>
+            <li>
+              <strong>Songs (lyrics + chord sheets).</strong> Verse/chorus
+              repetition, line length conventions, the way a chord line sits
+              above a lyric line.
+            </li>
+            <li>
+              <strong>Full books.</strong> Chapter structure, dialogue
+              attribution, prose vs. dialogue cadence. Already partway there
+              with the Shakespeare demo, but a long-form prose book exposes
+              the model's handling of paragraph- and chapter-scale structure.
+            </li>
+            <li>
+              <strong>Code.</strong> Indentation, balanced brackets, function
+              signatures, the convention that <code>def</code> is followed by
+              a colon and an indented block. A test of the model's
+              hierarchical reasoning.
+            </li>
+          </ul>
+          <p>
+            Each one is a 30-min-to-few-hours training run. The interesting
+            move isn't the data plumbing (which already works — just paste
+            UTF-8 or pick a Hugging Face dataset); it's the <em>presentation</em>:
+            each gallery card shows side-by-side <em>input format</em> vs.
+            <em>generated output</em>, so the visitor sees that the same
+            architecture picked up the structure of whatever it was fed.
+          </p>
+        </div>
+      </article>
+
+      <!-- 19: Quantization + LoRA fine-tuning — bundled, lands with Mac app -->
+      <article id="quant-lora" class="lever">
+        <div class="lever-head">
+          <span class="lever-num">19</span>
           <h2 class="lever-title">Quantization + LoRA fine-tuning</h2>
           <span class="status planned"><span class="dot"></span> Planned · lands with the Mac app</span>
         </div>
         <div class="lever-meta">
           <span>Three capabilities, one bundle</span>
-          <span>Cheapest implementation: native (MLX) — see lever 19</span>
+          <span>Cheapest implementation: native (MLX) — see lever 20</span>
         </div>
         <div class="lever-body">
           <p>
@@ -1252,10 +1309,10 @@ const pageBody = `
         </div>
       </article>
 
-      <!-- 19: Mac app — the remaining big piece -->
+      <!-- 20: Mac app — the remaining big piece -->
       <article id="mac" class="lever">
         <div class="lever-head">
-          <span class="lever-num">19</span>
+          <span class="lever-num">20</span>
           <h2 class="lever-title">Native macOS app (MLX-Swift)</h2>
           <span class="status planned"><span class="dot"></span> Planned · biggest single new project</span>
         </div>
@@ -1284,8 +1341,9 @@ const pageBody = `
             what belongs native is in
             <a href="https://github.com/sarthakagrawal927/tinygpt/blob/main/docs/shared_vs_native.md">
               <code>docs/shared_vs_native.md</code></a>.
-            Together with the gallery (lever 17) and the quant + LoRA bundle
-            (lever 18, which lands here), this is the remaining work.
+            Together with the gallery (lever 17), the diverse-data milestone
+            (lever 18), and the quant + LoRA bundle (lever 19, which lands
+            here), this is the remaining work.
           </p>
         </div>
       </article>
