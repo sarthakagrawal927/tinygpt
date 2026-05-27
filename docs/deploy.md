@@ -61,9 +61,24 @@ and build. First build is ~1 minute; subsequent builds are cached.
 After the first successful deploy:
 
 1. In the Pages project: **Custom domains → Set up a custom domain**.
-2. Add `tinygpt.sarthakagrawal.dev`.
-3. Because `sarthakagrawal.dev` already lives on Cloudflare (the main site is
-   deployed there), the CNAME is added automatically. SSL is automatic.
+2. Add `tinygpt.sarthakagrawal.dev`. CF Pages will then sit in **Verifying**
+   state and show you a CNAME to add.
+3. **Add the CNAME manually**, even though `sarthakagrawal.dev` is on the
+   same Cloudflare account. The "added automatically" claim that used to
+   live in this section was wrong — auto-CNAME only happens when you set up
+   the custom domain at the *same time* as the Pages project, via the
+   create-app flow. Adding a custom domain post-deploy requires the DNS
+   record manually:
+
+   - **Zone**: `sarthakagrawal.dev` → DNS → Records → Add record
+   - **Type**: `CNAME`
+   - **Name**: `tinygpt` (just the subdomain, not the full hostname)
+   - **Target**: the value CF Pages shows (e.g. `tinygpt.pages.dev`)
+   - **Proxy**: orange-cloud Proxied
+   - **TTL**: Auto
+
+4. Back in Pages → Custom domains, click **Check DNS records**. It flips to
+   **Active** in 30–60 s. SSL is then automatic.
 
 After a minute or two: <https://tinygpt.sarthakagrawal.dev>.
 
