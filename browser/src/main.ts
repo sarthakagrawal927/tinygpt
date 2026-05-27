@@ -2624,17 +2624,17 @@ async function setupDemoBanner(): Promise<void> {
       const file = new File([blob], "demo.tinygpt", { type: "application/octet-stream" });
       await loadModelFromFile(file, "pre-trained Shakespeare demo");
       banner.hidden = true;
-      // Take the user straight to the Watch & sample screen — that's where
-      // the Generate button lives. Otherwise they'd land back on Setup
-      // looking for "what now?". Defer one tick to let any final post-load
-      // state messages settle.
-      setTimeout(() => {
-        (window as unknown as { __tgGoToWatch?: () => void }).__tgGoToWatch?.();
-        // Focus the Generate button so a keyboard-first user can hit Enter
-        // immediately. Visually highlight too.
+      // Take the user straight to the Watch & sample screen and focus the
+      // Generate button. The "restored" worker message that actually
+      // enables #sample lands on a tick AFTER loadModelFromFile resolves,
+      // so poll briefly instead of guessing at a timeout.
+      (window as unknown as { __tgGoToWatch?: () => void }).__tgGoToWatch?.();
+      const tryFocus = (attempts: number) => {
         const sample = document.getElementById("sample") as HTMLButtonElement | null;
-        if (sample && !sample.disabled) sample.focus();
-      }, 50);
+        if (sample && !sample.disabled) { sample.focus(); return; }
+        if (attempts > 0) setTimeout(() => tryFocus(attempts - 1), 50);
+      };
+      tryFocus(20); // up to 1s total — well past the worker round-trip
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       btn.classList.remove("loading");

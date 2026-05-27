@@ -92,15 +92,23 @@ check("/demo.tinygpt reachable", demoMeta.ok);
 check("demo size under CF cap", demoMeta.size > 0 && demoMeta.size < 25 * 1024 * 1024,
   `${(demoMeta.size / 1024 / 1024).toFixed(1)} MB`);
 
-// 6. Load pretrained
+// 6. Load pretrained → expect auto-switch to Watch + Generate focused
 const tLoad = Date.now();
 await page.locator("#loadDemoBtn").click({ force: true });
 await page.locator("#demoBanner").waitFor({ state: "hidden", timeout: 90_000 }).catch(() => {});
 check("pretrained model loads", Date.now() - tLoad < 90_000, `${((Date.now() - tLoad) / 1000).toFixed(1)}s`);
 
-// 7. Navigate to Watch screen + Generate
-await page.locator(".screen-tab[data-screen='watch']").click({ force: true }).catch(() => {});
-await page.waitForTimeout(400);
+// Wait a beat for the 50ms setTimeout + screen swap animation
+await page.waitForTimeout(600);
+
+const screenState = await page.evaluate(() => ({
+  active: document.getElementById("screens")?.getAttribute("data-active"),
+  focused: document.activeElement?.id ?? "",
+  watchTabEnabled: !document.querySelector(".screen-tab[data-screen='watch']")?.disabled,
+}));
+check("auto-switched to Watch screen", screenState.active === "watch", `data-active=${screenState.active}`);
+check("Generate button focused", screenState.focused === "sample", `activeElement=#${screenState.focused}`);
+check("Watch tab is enabled", screenState.watchTabEnabled);
 const tGen = Date.now();
 await page.evaluate(() => document.getElementById("sample")?.click());
 
