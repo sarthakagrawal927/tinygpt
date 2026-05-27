@@ -1,0 +1,63 @@
+# Auto-deploy the browser playground to Cloudflare Pages on every push to main.
+#
+# Why a GitHub Action and not native CF Pages Git integration: the `tinygpt`
+# CF Pages project was originally set up as direct-upload, and CF Pages does
+# not allow direct-upload projects to be retroactively connected to Git.
+# Re-creating the project would require re-pointing the custom domain. This
+# workflow keeps everything where it is and just runs `wrangler pages deploy`
+# from GitHub's runners.
+#
+# Required GitHub secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN  — a Cloudflare API token with the "Pages: Edit"
+#                            permission scoped to the user's account.
+#                            Create at: https://dash.cloudflare.com/profile/api-tokens
+#                            Use the "Edit Cloudflare Workers" template, or
+#                            a custom token with: Account → Cloudflare Pages → Edit.
+#   CLOUDFLARE_ACCOUNT_ID — your account ID. Found at:
+#                            https://dash.cloudflare.com/ → any project sidebar.
+
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+  # Allow manual triggering from the Actions tab too.
+  workflow_dispatch:
+
+# Only one deploy in flight at a time; cancel any earlier in-flight run on a
+# new push so we don't race deploys against each other.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: browser/package-lock.json
+
+      - name: Install dependencies
+        working-directory: browser
+        run: npm ci
+
+      - name: Build (copy docs + tsc + astro build)
+        working-directory: browser
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy browser/dist --project-name=tinygpt --commit-dirty=true --branch=main
