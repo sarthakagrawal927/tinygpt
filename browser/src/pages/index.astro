@@ -48,9 +48,24 @@ const pageStyle = `
       a:hover { text-decoration: underline; }
       code, pre { font-family: var(--font-mono); }
 
-      /* Mobile-responsive — tighten everything for narrow viewports */
+      /* Block background scroll whenever any <dialog> is in modal state.
+         <dialog>.showModal() should do this natively, but the inert
+         enforcement has historically been spotty on iOS Safari, so this is
+         a belt-and-braces. :has() is supported on every browser we target
+         (Chromium 105+, Safari 15.4+, Firefox 121+). */
+      html:has(dialog[open]),
+      body:has(dialog[open]) {
+        overflow: hidden;
+        /* Lock scroll-position so the page doesn't jump when overflow is
+           toggled — this preserves visual continuity when the dialog closes. */
+        overscroll-behavior: contain;
+      }
+
+      /* Mobile-responsive — tighten everything for narrow viewports.
+         Horizontal padding kept at 20px (not the previous 16px) so cards
+         have breathing room from the screen edge. */
       @media (max-width: 720px) {
-        .wrap { padding: 36px 16px 80px; }
+        .wrap { padding: 32px 20px 96px; }
         header { margin-bottom: 36px; }
         .brand { gap: 10px; }
         .brand h1 { font-size: 24px; }
@@ -59,6 +74,10 @@ const pageStyle = `
         .header-btn { padding: 6px 10px; font-size: 11.5px; }
         .lede { font-size: 14px; }
         .card { padding: 22px 18px; border-radius: 10px; }
+        /* Banner + intro card should also breathe on mobile. */
+        .demo-banner, .intro-card { padding: 18px 20px; }
+        /* Tighter dialog padding so 14"-narrow phones don't push content off. */
+        dialog#welcome, dialog#shortcuts { padding: 22px 20px; margin: 16px; }
         .card + .card { margin-top: 22px; }
         .card-title { font-size: 11px; margin-bottom: 16px; }
         .machine { padding: 14px 16px; margin-bottom: 32px; }
