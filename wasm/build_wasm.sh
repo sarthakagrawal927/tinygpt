@@ -33,7 +33,7 @@ emcc \
   "$ROOT"/wasm/src/attention.cpp \
   "$ROOT"/wasm/src/adamw.cpp \
   "$ROOT"/wasm/src/model.cpp \
-  -O3 -std=c++17 -msimd128 -mrelaxed-simd -pthread \
+  -O3 -std=c++17 -msimd128 -pthread \
   -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORT_NAME=createTinyGPT \
   -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=33554432 \
   -s MAXIMUM_MEMORY=2147483648 \

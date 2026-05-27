@@ -550,6 +550,29 @@ els.start.addEventListener("click", () => {
     );
     return;
   }
+  // Behemoth-tier check: any config that needs the 64-bit module to GROW
+  // past INITIAL_MEMORY (256 MB) hits a known browser-only race between
+  // pthread workers and memory.grow — workers hold stale HEAPF32 views,
+  // write into wrong addresses, weights corrupt, gradients explode, loss
+  // shows ~85 instead of 5.55. Tracked as #66's outstanding tail. Rather
+  // than let the run silently produce garbage, block it with a clear
+  // message until the proper SAB-view-aware C++ helpers land.
+  const heapNeeded = estParams * 12 + cfg.batchSize * cfg.ctx * 4 * (cfg.layers * 18 + 4); // weights+adam + per-step activations
+  if (cfg.backend === "wasm" && heapNeeded > 240 * 1024 * 1024) {
+    window.alert(
+      `This config needs ~${(heapNeeded / 1024 / 1024).toFixed(0)} MB of WASM heap, ` +
+      `which forces memory.grow() during training. There's a known race in ` +
+      `the browser between memory.grow() and the pthread workers that produces ` +
+      `garbage gradients (loss stuck around 80–90 instead of dropping from ~5.55).\n\n` +
+      `Workarounds:\n` +
+      `  • Pick a smaller preset (XL or below) — those fit without growth.\n` +
+      `  • Switch backend to WebGPU — different code path, not affected.\n` +
+      `  • Run on the Python CLI for genuinely big models.\n\n` +
+      `Tracked as roadmap item #9 — fix needs C++ kernel changes to use ` +
+      `GROWABLE_HEAP_* helpers so workers re-resolve their heap views after growth.`,
+    );
+    return;
+  }
   if (warnings.length > 0) {
     const ok = window.confirm(
       "⚠ Heads up — this config is likely to produce poor output:\n\n" +
