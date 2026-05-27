@@ -2668,24 +2668,56 @@ function setupSystemPressure(): void {
   } catch { /* nothing — chip stays hidden */ }
 }
 
-// --- default corpus — fetch Shakespeare on init --------------------------
-// The textarea is empty in the HTML; on first load we populate it with the
-// bundled Shakespeare (~1.1 MB) so that "train your own from scratch" has
-// real data ready without any user input. If the user has already typed,
-// pasted, or restored a corpus (loadState ran first), leave that alone.
-async function setupDefaultCorpus(): Promise<void> {
-  try {
+// --- default corpus — lazy-loaded Shakespeare ----------------------------
+// Earlier this fired eagerly on page load, costing ~2.4 s of network time
+// per visit to download 1.1 MB even for users who'd never look at the
+// corpus textarea (most click "Load pretrained model" instead). Now the
+// fetch is deferred until the user actually needs it: when they focus the
+// textarea, when training starts, or when the browser hits an idle moment.
+// Whichever happens first wins; subsequent requests no-op via the
+// fetchPromise cache.
+let corpusFetchPromise: Promise<string> | null = null;
+function fetchShakespeare(): Promise<string> {
+  if (corpusFetchPromise) return corpusFetchPromise;
+  corpusFetchPromise = (async () => {
     const resp = await fetch("/shakespeare.txt");
-    if (!resp.ok) return;
+    if (!resp.ok) throw new Error(`shakespeare.txt: HTTP ${resp.status}`);
     const text = await resp.text();
     defaultCorpus = text;
-    // Only auto-fill the textarea if the user hasn't already supplied content
-    // (typed, pasted, restored from state, applied from URL).
+    return text;
+  })();
+  return corpusFetchPromise;
+}
+
+async function ensureCorpusLoaded(): Promise<void> {
+  if (els.corpus.value.trim().length > 0) return; // user already supplied text
+  try {
+    const text = await fetchShakespeare();
     if (els.corpus.value.trim().length === 0) {
       els.corpus.value = text;
       els.corpus.dispatchEvent(new Event("input", { bubbles: true }));
     }
-  } catch { /* network/parse failed — leave textarea empty so the user can paste */ }
+  } catch { /* leave textarea empty so user can paste their own */ }
+}
+
+function setupDefaultCorpus(): void {
+  // Three triggers, whichever fires first:
+  // 1. user focuses or clicks into the textarea (they're about to need it)
+  // 2. user clicks Start (training is about to read it)
+  // 3. browser is idle (warm the cache for the eventual click)
+  const trigger = () => { void ensureCorpusLoaded(); };
+  els.corpus.addEventListener("focus", trigger, { once: true });
+  els.corpus.addEventListener("click", trigger, { once: true });
+  els.start.addEventListener("click", trigger, { once: true });
+  // Idle warm-up: most visitors stay on the page > 2 s before doing
+  // anything; pre-fetch in that gap so by the time they click Train the
+  // file is already cached. requestIdleCallback isn't available on Safari.
+  const ric = (globalThis as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void }).requestIdleCallback;
+  if (ric) {
+    ric(trigger, { timeout: 4000 });
+  } else {
+    setTimeout(trigger, 2500);
+  }
 }
 
 // --- demo banner — "Try a trained model" CTA -----------------------------
