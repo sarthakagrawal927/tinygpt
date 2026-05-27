@@ -79,10 +79,14 @@ await page.waitForTimeout(2500);
 const corpusLen = await page.evaluate(() => document.getElementById("corpus")?.value.length ?? 0);
 check("Shakespeare corpus auto-loaded", corpusLen > 1_000_000, `${corpusLen} bytes`);
 
-// 5. demo.tinygpt — is the new Medium model under 25 MB?
+// 5. demo.tinygpt — is the new Medium model under 25 MB? CF Pages strips
+// Content-Length on HEAD for binary files, so we do a GET and measure the
+// actual bytes.
 const demoMeta = await page.evaluate(async () => {
-  const r = await fetch("/demo.tinygpt", { method: "HEAD" });
-  return { ok: r.ok, size: Number(r.headers.get("content-length") || 0) };
+  const r = await fetch("/demo.tinygpt");
+  if (!r.ok) return { ok: false, size: 0 };
+  const buf = await r.arrayBuffer();
+  return { ok: true, size: buf.byteLength };
 });
 check("/demo.tinygpt reachable", demoMeta.ok);
 check("demo size under CF cap", demoMeta.size > 0 && demoMeta.size < 25 * 1024 * 1024,

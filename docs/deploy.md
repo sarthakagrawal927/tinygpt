@@ -37,24 +37,53 @@ Three resolutions, ranked:
    build-time fetch step. Most complex; only worth it if the WASM grows past
    1 MB and git becomes a real burden.
 
-## Cloudflare Pages — one-time setup
+## Deploying — current state and how it actually works
 
-In the Cloudflare dashboard:
+**Heads-up.** The `tinygpt` Pages project is currently set up as a
+**direct-upload** project (Git Provider: No in `wrangler pages project list`).
+That means every `git push` to GitHub does *nothing* for the live site —
+deploys need an explicit `wrangler pages deploy`.
 
-1. **Workers & Pages → Pages → Create application → Connect to Git**
+### Manual deploy (current path)
+
+```bash
+cd browser
+npm run build
+npx wrangler pages deploy dist --project-name=tinygpt --commit-dirty=true
+```
+
+That uploads `dist/` to the production environment. Output ends with
+`✨ Deployment complete! Take a peek over at https://<hash>.tinygpt.pages.dev`
+and the canonical `tinygpt.sarthakagrawal.dev` updates immediately (CF Pages
+does no edge caching on `must-revalidate` files; HTML and assets are
+re-fetched on every request).
+
+### Auto-deploy via Git (recommended one-time setup)
+
+If you want every `git push` to auto-deploy, connect Git provider in the
+Cloudflare dashboard:
+
+1. **Workers & Pages → tinygpt → Settings → Builds & deployments → Connect to Git**
 2. Select `sarthakagrawal927/tinygpt`.
 3. **Build configuration:**
    - Production branch: `main`
-   - Framework preset: *None* (Vite isn't in the preset list, but the explicit
-     settings below work)
+   - Framework preset: *None* (Astro auto-detected; Vite isn't in the preset list)
    - Root directory: `browser`
    - Build command: `npm install && npm run build`
    - Build output directory: `dist`
 4. **Environment variables:** none required.
-5. Save and Deploy.
+5. Save. Next push triggers an auto-deploy.
 
-Cloudflare will clone the whole repo, `cd` into `browser/`, install dependencies
-and build. First build is ~1 minute; subsequent builds are cached.
+Cloudflare clones the whole repo, `cd`s into `browser/`, installs dependencies
+and builds. First build is ~1 minute; subsequent builds are cached.
+
+**Possible gotcha** with the auto-deploy: the docs library at `/docs/<slug>`
+imports markdown from `../../../../docs/*.md`, which crosses the Astro `src/`
+boundary. This is allowed by `vite.fs.allow: [".."]` in `astro.config.mjs` and
+works locally and via direct upload — but if CF Pages' Vite/Node version
+disagrees, the build will fail. If that happens, copy `docs/*.md` into
+`browser/src/content/docs/` and update the `.astro` wrappers to import from
+the new path.
 
 ## Custom domain
 
