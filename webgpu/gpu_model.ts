@@ -228,6 +228,40 @@ export class GpuModel {
     return { logits, caches, lastX: x, lnf, idsT, N };
   }
 
+  /**
+   * Serialize the trained model into the same flat buffer layout the WASM
+   * backend produces (see `tg_export_state` in `wasm/src/model.cpp` and the
+   * matching reader in `browser/src/main.ts:buildManifest` /
+   * `encodeModelFile`):
+   *
+   *   4 bytes  int32 LE  step counter
+   *   ...      float32   per-param triplets [w, m, v], in the order params
+   *                      were created in `initWeights()` (token + position
+   *                      embeddings, final layernorm, then per-block:
+   *                      ln1, q/k/v/o projections, ln2, MLP fc_in/fc_out).
+   *
+   * This is the on-disk format the .tinygpt header keys off, so the resulting
+   * ArrayBuffer can be passed straight into `encodeModelFile()` and the saved
+   * file is loadable in any TinyGPT backend (WASM or another WebGPU session).
+   */
+  async exportState(): Promise<ArrayBuffer> {
+    let totalFloats = 0;
+    for (const p of this.params) totalFloats += p.size * 3; // w + m + v
+    const buf = new ArrayBuffer(4 + totalFloats * 4);
+    new Int32Array(buf, 0, 1)[0] = this.stepCount;
+    const f32 = new Float32Array(buf, 4);
+    let off = 0;
+    for (const p of this.params) {
+      // Pull weights and Adam moments back to CPU. Each download is an async
+      // GPU→CPU readback; doing them serially keeps memory pressure manageable
+      // (one Float32Array per param at a time) and avoids overlapping mapAsync.
+      const w = await p.w.download(); f32.set(w, off); off += w.length;
+      const m = await p.m.download(); f32.set(m, off); off += m.length;
+      const v = await p.v.download(); f32.set(v, off); off += v.length;
+    }
+    return buf;
+  }
+
   /** Autoregressive generation from a prompt. temperature <= 0 is greedy.
    *  Optional `onToken` callback fires once per newly-sampled token so the
    *  caller can stream output instead of waiting for the full sequence. */

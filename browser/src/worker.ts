@@ -209,8 +209,12 @@ async function runWebGpu(text: string, cfg: RunConfig): Promise<void> {
     });
     await sleep(0);
   }
-  // The WebGPU model has no checkpoint serialization yet — survives-refresh
-  // stays a WASM-backend feature.
+  // Export trained weights so the user can download the model + survives-refresh
+  // works for WebGPU too (same .tinygpt format the WASM backend produces).
+  if (gpuModel) {
+    const state = await gpuModel.exportState();
+    post({ type: "checkpoint", state }, [state]);
+  }
   lastCfg = cfg;
   lastTokens = tokens;
   lastStep = step;
@@ -341,6 +345,10 @@ async function continueWebgpu(extraSteps: number, startStep: number, newTotal: n
       },
     });
     await sleep(0);
+  }
+  if (gpuModel) {
+    const state = await gpuModel.exportState();
+    post({ type: "checkpoint", state }, [state]);
   }
   lastStep = step;
   lastCfg = { ...cfg, maxSteps: newTotal };

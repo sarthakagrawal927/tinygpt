@@ -112,22 +112,45 @@ while (true) {
 }
 
 console.log("\n--- saving checkpoint ---");
+// Wait for the worker's "checkpoint" message to fire and main.ts to assign
+// `latestState` — that's what enables the download button. The downloadModel
+// click handler returns early ("nothing trained yet") if `latestState` is
+// still null, so polling for the enabled state avoids a silent no-op click.
+await page.waitForFunction(() => {
+  const btn = document.getElementById("downloadModel");
+  return btn && !btn.disabled;
+}, null, { timeout: 60_000 }).catch(() => {
+  console.log("WARN: #downloadModel never enabled — worker may not have posted checkpoint");
+});
+
 // #modelMenuBtn lives in a controls cluster that's visibility-toggled —
 // Playwright's locator.click() rejects with "Element is not visible". Bypass
 // the visibility check by invoking the DOM click handler directly. Same for
 // #downloadModel, which lives inside the menu and only becomes interactable
 // after the parent click.
-await page.evaluate(() => document.getElementById("modelMenuBtn").click());
-await page.waitForTimeout(150);
-const [download] = await Promise.all([
-  page.waitForEvent("download", { timeout: 60_000 }),
-  page.evaluate(() => document.getElementById("downloadModel").click()),
-]);
-const tmp = await download.path();
-console.log(`download arrived at ${tmp}; copying to ${DEMO_OUT}`);
-await fs.copyFile(tmp, DEMO_OUT);
-const stat = await fs.stat(DEMO_OUT);
-console.log(`demo.tinygpt: ${stat.size} bytes`);
-
-await browser.close();
-console.log("done.");
+try {
+  await page.evaluate(() => document.getElementById("modelMenuBtn").click());
+  await page.waitForTimeout(150);
+  const [download] = await Promise.all([
+    page.waitForEvent("download", { timeout: 120_000 }),
+    page.evaluate(() => document.getElementById("downloadModel").click()),
+  ]);
+  const tmp = await download.path();
+  console.log(`download arrived at ${tmp}; copying to ${DEMO_OUT}`);
+  await fs.copyFile(tmp, DEMO_OUT);
+  const stat = await fs.stat(DEMO_OUT);
+  console.log(`demo.tinygpt: ${stat.size} bytes`);
+  await browser.close();
+  console.log("done.");
+} catch (err) {
+  console.log("\n=== DOWNLOAD FAILED — leaving browser open for manual rescue ===");
+  console.log(`error: ${err?.message ?? err}`);
+  console.log("The trained model is still in the page's memory.");
+  console.log("In the open browser window:");
+  console.log("  1. Click the 'Model ▾' button (right of Start)");
+  console.log("  2. Click 'Download .tinygpt'");
+  console.log(`  3. Save the file as: ${DEMO_OUT}`);
+  console.log("Then quit this script with Ctrl+C.\n");
+  // Keep the script (and browser) alive so the user can rescue the model.
+  await new Promise(() => {}); // never resolves
+}
