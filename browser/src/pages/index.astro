@@ -181,6 +181,53 @@ const pageStyle = `
       }
       .lede a:hover { text-decoration-color: var(--accent); }
 
+      /* First-visit explainer — shown above the demo banner; one-time, dismiss
+         persists via localStorage so repeat visitors see a clean playground. */
+      .intro-card {
+        position: relative;
+        margin: 0 0 22px;
+        padding: 24px 28px 22px;
+        background:
+          linear-gradient(135deg, rgba(72, 229, 194, 0.06), transparent 65%),
+          var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        animation: rise-in 0.45s var(--ease-out-expo) 0.4s both;
+      }
+      .intro-card[hidden] { display: none; }
+      .intro-title {
+        margin: 0 0 10px;
+        font: 600 18px/1.3 var(--font-sans);
+        color: var(--fg);
+      }
+      .intro-card p {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 14.5px; line-height: 1.6;
+      }
+      .intro-card p:last-child { margin-bottom: 0; }
+      .intro-card em {
+        color: var(--accent);
+        font-style: normal;
+        font-weight: 500;
+      }
+      .intro-card strong { color: var(--fg); font-weight: 500; }
+      .intro-card .intro-why { color: var(--faint); font-size: 13.5px; }
+      .intro-card .intro-why strong { color: var(--muted); }
+      .intro-card a { color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent-dim); }
+      .intro-card a:hover { border-bottom-color: var(--accent); }
+      .intro-dismiss {
+        position: absolute; top: 10px; right: 12px;
+        background: none; border: none;
+        color: var(--faint);
+        font: 18px/1 var(--font-sans);
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 4px;
+        transition: color 0.15s, background 0.15s;
+      }
+      .intro-dismiss:hover { color: var(--fg); background: var(--line); }
+
       /* Demo banner — first-visit CTA above the train card */
       .demo-banner {
         display: flex; align-items: center; justify-content: space-between;
@@ -1204,6 +1251,60 @@ const pageStyle = `
       }
       @media (max-width: 720px) {
         canvas#chart { height: 240px; }
+      }
+
+      /* Live training-sample card — appears under the loss chart while the
+         model is training. The model's output is sampled periodically; this
+         renders the current state so the user can watch language emerge. */
+      .live-sample-card {
+        margin-top: 18px;
+        padding: 16px 18px;
+        background:
+          linear-gradient(135deg, rgba(72, 229, 194, 0.05), transparent 60%),
+          var(--panel);
+        border: 1px solid var(--accent-dim);
+        border-radius: 10px;
+      }
+      .live-sample-card[hidden] { display: none; }
+      .live-sample-head {
+        display: flex; justify-content: space-between; align-items: baseline;
+        margin-bottom: 10px;
+      }
+      .live-sample-label {
+        font: 500 11px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+      .live-sample-step {
+        font: 500 11px/1 var(--font-mono);
+        color: var(--faint);
+        font-variant-numeric: tabular-nums;
+      }
+      .live-sample-text {
+        margin: 0 0 8px;
+        padding: 12px 14px;
+        background: #0b0d12;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font: 13px/1.55 var(--font-mono);
+        color: var(--muted);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 220px;
+        overflow-y: auto;
+        min-height: 60px;
+      }
+      .live-sample-text.flash {
+        animation: live-flash 0.6s ease-out;
+      }
+      @keyframes live-flash {
+        0%   { background: rgba(72, 229, 194, 0.12); }
+        100% { background: #0b0d12; }
+      }
+      .live-sample-hint {
+        font: 12px/1.5 var(--font-sans);
+        color: var(--faint);
       }
 
       /* Primary stats — 4 big tabular numbers under the chart */
@@ -2463,6 +2564,30 @@ const pageBody = `
         </p>
       </header>
 
+      <!-- First-visit explainer for non-engineer visitors. Wired by
+           setupIntroCard() in main.ts; remembers dismissal in localStorage,
+           so a repeat visitor sees a clean playground. -->
+      <aside id="introCard" class="intro-card" hidden>
+        <button id="introDismiss" class="intro-dismiss" type="button" aria-label="Dismiss intro">×</button>
+        <h2 class="intro-title">What is this?</h2>
+        <p>
+          A <em>language model</em> — the same kind of system as ChatGPT, but
+          a million times smaller and trained right here in your browser
+          tab, not on a datacenter somewhere. Click <strong>Load pretrained
+          model</strong> below to see one we trained earlier; click
+          <strong>Start training</strong> to teach a fresh one in a few
+          minutes on whatever text you give it.
+        </p>
+        <p class="intro-why">
+          <strong>Why it matters:</strong> modern AI runs on a stack so deep
+          that "training a model" sounds like magic. This shows the whole
+          stack — every line of math is in the
+          <a href="https://github.com/sarthakagrawal927/tinygpt" target="_blank" rel="noopener">source</a>,
+          every kernel is tested, every speedup is measured. It demystifies
+          the technology one button-click at a time.
+        </p>
+      </aside>
+
       <!-- Screen nav: Setup ⟷ Watch -->
       <div class="screen-nav" id="screenNav">
         <button class="screen-tab active" data-screen="setup" type="button">
@@ -2480,9 +2605,9 @@ const pageBody = `
         <div class="demo-banner-body">
           <strong>Two ways to see this work:</strong>
           <span>
-            <em>Skip ahead</em> — load a tiny 840k-param model trained on Shakespeare and hit <kbd>Generate</kbd>.
-            It picks up the <em>rhythm</em> — character labels, verse line breaks, the cadence — but it's
-            8.4× smaller than nanoGPT-Shakespeare, so it's pseudo-English, not real prose.
+            <em>Skip ahead</em> — load a 9.6M-param Shakespeare model we trained earlier (train loss 1.22)
+            and hit <kbd>Generate</kbd>. Real words, sentences with Shakespearean structure, character labels.
+            Shipped as a quantized fp16 checkpoint so the download stays small (~18 MB).
             Or <em>train your own from scratch</em> in your browser (~4–15 min depending on preset) using the controls below.
           </span>
         </div>
@@ -2795,6 +2920,22 @@ const pageBody = `
           <div class="milestone" id="milestone" hidden>
             <span class="milestone-dot"></span>
             <span class="milestone-text" id="milestoneText"></span>
+          </div>
+
+          <!-- Live training-sample visualizer. Hidden until the worker
+               emits its first progress_sample. Shows how the model's output
+               evolves from random characters to recognizable language as
+               training proceeds. -->
+          <div id="liveSampleCard" class="live-sample-card" hidden>
+            <div class="live-sample-head">
+              <span class="live-sample-label">Live sample</span>
+              <span class="live-sample-step" id="liveSampleStep">step –</span>
+            </div>
+            <pre id="liveSampleText" class="live-sample-text"></pre>
+            <span class="live-sample-hint">
+              The model's current output, refreshed every few steps. Watch random
+              characters become letter patterns, then words, then sentences.
+            </span>
           </div>
         </section>
 

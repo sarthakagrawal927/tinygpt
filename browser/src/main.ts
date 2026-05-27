@@ -601,6 +601,9 @@ els.start.addEventListener("click", () => {
   paused = false;
   els.pause.textContent = "Pause";
   setRunning(true);
+  // Hide any prior run's live-sample card; the worker will reveal it on the
+  // first progress_sample of the new run.
+  { const liveCard = document.getElementById("liveSampleCard"); if (liveCard) liveCard.hidden = true; }
   els.sample.disabled = false;
   lastConfig = readConfig();
   trackTrainStarted({
@@ -767,6 +770,9 @@ els.continueBtn.addEventListener("click", () => {
   paused = false;
   els.pause.textContent = "Pause";
   setRunning(true);
+  // Hide any prior run's live-sample card; the worker will reveal it on the
+  // first progress_sample of the new run.
+  { const liveCard = document.getElementById("liveSampleCard"); if (liveCard) liveCard.hidden = true; }
   setStatus(`continuing for ${extra} more steps…`);
   // Don't reset history/chart — the new progress points extend the same curve.
   runStartTime = performance.now();
@@ -1247,9 +1253,78 @@ async function decodeModelFile(file: File): Promise<{ config: RunConfig; state: 
   const headerLen = view.getUint32(8, true);
   if (12 + headerLen > buf.byteLength) throw new Error("model header is malformed");
   const headerJson = new TextDecoder().decode(new Uint8Array(buf, 12, headerLen));
-  const header = JSON.parse(headerJson) as { config: RunConfig };
-  const state = buf.slice(12 + headerLen);
-  return { config: header.config, state, header: header as Record<string, unknown> };
+  const header = JSON.parse(headerJson) as Record<string, unknown> & { config: RunConfig };
+  let state = buf.slice(12 + headerLen);
+
+  // Compact format: weights-only fp16 + no optimizer state. Expand back to the
+  // canonical [w_fp32, m_zero, v_zero] triplets so the existing WASM importer
+  // doesn't need to know about quantization or layout variants. Bumps the
+  // state by ~6× (fp16 → 3 × fp32) but stays in JS memory, never goes through
+  // the network — the FILE on disk is still ~10× smaller than the canonical.
+  if (header.weightDtype === "fp16" && header.includesOptimizerState === false) {
+    state = expandFp16WeightsOnly(state, header.config);
+    header.weightDtype = "fp32";              // signal the canonical layout to downstream consumers
+    header.includesOptimizerState = true;     // moments are zero-filled, but the LAYOUT now matches
+  }
+
+  return { config: header.config, state, header };
+}
+
+/** Convert a weights-only fp16 state buffer to the canonical
+ *  [step(int32), then per-param [w_fp32, m=0, v=0]] layout the WASM
+ *  importer expects. Used to load the small (~19 MB) variant of a Huge
+ *  checkpoint shipped as the demo model. */
+function expandFp16WeightsOnly(stateFp16: ArrayBuffer, config: RunConfig): ArrayBuffer {
+  const manifest = buildManifest(config);
+  const totalFloats = manifest.reduce((acc, t) => acc + t.shape.reduce((a, b) => a * b, 1), 0);
+  const expectedFp16Bytes = 4 + totalFloats * 2; // 4-byte step prefix + N × 2 bytes
+  if (stateFp16.byteLength !== expectedFp16Bytes) {
+    throw new Error(
+      `fp16 state size mismatch: got ${stateFp16.byteLength} bytes, expected ${expectedFp16Bytes} ` +
+      `(int32 step + ${totalFloats} fp16 weights)`,
+    );
+  }
+  // Output: int32 step + 3 × fp32 per param.
+  const outBytes = 4 + totalFloats * 3 * 4;
+  const out = new ArrayBuffer(outBytes);
+  new Int32Array(out, 0, 1)[0] = new Int32Array(stateFp16, 0, 1)[0];
+  const f32 = new Float32Array(out, 4);
+  const fp16View = new DataView(stateFp16, 4); // skip step prefix
+  // Walk each tensor in manifest order. For each, write w (decoded fp16 → fp32),
+  // then zero-fill the m and v ranges. The output offsets stride by 3×size.
+  let f16Idx = 0;
+  let outFloat = 0;
+  for (const t of manifest) {
+    const size = t.shape.reduce((a, b) => a * b, 1);
+    for (let i = 0; i < size; i++) {
+      const h = fp16View.getUint16((f16Idx + i) * 2, true);
+      f32[outFloat + i] = fp16ToFp32(h);
+    }
+    // m and v zero-init — already zero from ArrayBuffer allocation.
+    f16Idx += size;
+    outFloat += size * 3;
+  }
+  return out;
+}
+
+/** IEEE 754 half-precision (binary16) → single-precision (binary32) decode.
+ *  Handles subnormals, infinities, NaN. Pure JS; called per weight on load,
+ *  so the loop in expandFp16WeightsOnly is the hot path. */
+function fp16ToFp32(h: number): number {
+  const sign = (h >> 15) & 0x1;
+  const exp  = (h >> 10) & 0x1f;
+  const frac = h & 0x3ff;
+  if (exp === 0) {
+    // Subnormal or zero.
+    if (frac === 0) return sign ? -0 : 0;
+    // Subnormal: (-1)^s * frac * 2^-24
+    return (sign ? -1 : 1) * frac * Math.pow(2, -24);
+  }
+  if (exp === 0x1f) {
+    return frac === 0 ? (sign ? -Infinity : Infinity) : NaN;
+  }
+  // Normalized.
+  return (sign ? -1 : 1) * (1 + frac / 1024) * Math.pow(2, exp - 15);
 }
 
 els.downloadModel.addEventListener("click", () => {
@@ -1977,6 +2052,23 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
         els.stEta.textContent = formatTime(tokensLeft / p.tokensPerSecond);
       } else {
         els.stEta.textContent = p.step >= p.maxSteps ? "done" : "…";
+      }
+      break;
+    }
+    case "progress_sample": {
+      // Live sample mid-training — render it in the visualizer card so the
+      // user watches output evolve from random → words → sentences.
+      const card = document.getElementById("liveSampleCard");
+      const stepEl = document.getElementById("liveSampleStep");
+      const textEl = document.getElementById("liveSampleText");
+      if (card && stepEl && textEl) {
+        card.hidden = false;
+        stepEl.textContent = `step ${msg.step}`;
+        textEl.textContent = msg.sample;
+        textEl.classList.remove("flash");
+        // Force reflow so the animation re-triggers on each update.
+        void textEl.offsetWidth;
+        textEl.classList.add("flash");
       }
       break;
     }

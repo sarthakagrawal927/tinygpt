@@ -189,6 +189,16 @@ async function runWebGpu(text: string, cfg: RunConfig): Promise<void> {
   let tokensProcessed = 0;
   let step = 0;
   const chunk = 4;
+  // Periodic live sample during training — makes the *learning* visible the
+  // way the loss curve makes the loss visible. Random chars → letter patterns
+  // → words. Interval is chosen so sampling stays under ~5% overhead: roughly
+  // every 8% of total training (max ~12 samples per run, min every 100 steps).
+  const sampleEveryN = Math.max(100, Math.floor(cfg.maxSteps / 12));
+  let nextSampleAt = sampleEveryN;
+  // 64-token sample with a short empty-ish prompt — costs ~0.5-2s on Small
+  // depending on hardware, dominated by per-token forward passes.
+  const SAMPLE_TOKENS = 64;
+  const SAMPLE_PROMPT_IDS = [10]; // single space, neutral prompt
   while (step < cfg.maxSteps && !stopped) {
     if (paused) { await sleep(60); continue; }
     let trainLoss = 0;
@@ -207,6 +217,14 @@ async function runWebGpu(text: string, cfg: RunConfig): Promise<void> {
         backend: "webgpu",
       },
     });
+    // Live sample at the threshold. Re-uses the existing generate path; no
+    // KV cache, so this is N forward passes. The overhead is bounded by the
+    // chunk schedule and the sampleEveryN spacing — by design < 5% of run time.
+    if (step >= nextSampleAt && step < cfg.maxSteps) {
+      const tokens = await gpuModel.generate(SAMPLE_PROMPT_IDS, SAMPLE_TOKENS, 0.8, 40, step);
+      post({ type: "progress_sample", step, sample: decode(Uint8Array.from(tokens)) });
+      nextSampleAt += sampleEveryN;
+    }
     await sleep(0);
   }
   // Export trained weights so the user can download the model + survives-refresh

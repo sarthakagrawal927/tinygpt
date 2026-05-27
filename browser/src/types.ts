@@ -81,6 +81,9 @@ export interface InspectResult {
 export type FromWorker =
   | { type: "status"; message: string }
   | { type: "progress"; progress: TrainingProgress }
+  // Live sample emitted periodically during training so the user sees the
+  // model's output evolving from random → words → sentences in real time.
+  | { type: "progress_sample"; step: number; sample: string }
   // Generation flow: sample_begin (echo prompt) → sample_chunk* (live decode
   // updates) → sample_done (final text + tokens/sec). Legacy `sample` is kept
   // for the WASM path that doesn't stream per token.
