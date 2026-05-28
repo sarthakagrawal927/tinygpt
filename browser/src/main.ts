@@ -1275,11 +1275,43 @@ function encodeModelFile(config: RunConfig, state: ArrayBuffer): Blob {
     manifest: buildManifest(config),
     includesOptimizerState: true, // current WASM export bundles Adam m, v
     stateByteLength: state.byteLength,
-    lossHistory: history.slice(-512).map((p) => ({
-      step: p.step,
-      train: +p.trainLoss.toFixed(4),
-      val: p.valLoss != null ? +p.valLoss.toFixed(4) : null,
-    })),
+    // Downsample evenly across the WHOLE run instead of keeping the last
+    // 512 points. With the old cap the saved curve covered ~10% of a
+    // 5000-step run (steps 2956→5000 in the gallery models), which
+    // rendered as an empty-left-half chart when reloaded. Now: every
+    // ceil(N/512)th point + the very last one, so the saved history
+    // spans from first→last and the loaded chart fills out.
+    lossHistory: (() => {
+      const N = history.length;
+      const cap = 512;
+      if (N === 0) return [];
+      if (N <= cap) return history.map((p) => ({
+        step: p.step,
+        train: +p.trainLoss.toFixed(4),
+        val: p.valLoss != null ? +p.valLoss.toFixed(4) : null,
+      }));
+      const stride = Math.ceil(N / cap);
+      const out: { step: number; train: number; val: number | null }[] = [];
+      for (let i = 0; i < N; i += stride) {
+        const p = history[i];
+        out.push({
+          step: p.step,
+          train: +p.trainLoss.toFixed(4),
+          val: p.valLoss != null ? +p.valLoss.toFixed(4) : null,
+        });
+      }
+      // Always include the final point so finalLoss matches lossHistory's
+      // tail exactly (otherwise loaded charts under-report the final step).
+      const last = history[N - 1];
+      if (out[out.length - 1].step !== last.step) {
+        out.push({
+          step: last.step,
+          train: +last.trainLoss.toFixed(4),
+          val: last.valLoss != null ? +last.valLoss.toFixed(4) : null,
+        });
+      }
+      return out;
+    })(),
     finalLoss: final ? { step: final.step, train: final.trainLoss, val: final.valLoss ?? null } : null,
     sample: lastSampleText.slice(0, 320),
     bestVal: Number.isFinite(bestVal) ? { loss: bestVal, step: bestValStep } : null,

@@ -187,40 +187,66 @@ export class LossChart {
       return;
     }
 
-    // X-axis spans 0..(target maxSteps if known, else last observed step).
-    // Using the target makes the chart line GROW from the left edge instead
-    // of stretching auto-scaled at every new point.
+    // --- X range -----------------------------------------------------
+    // Live-training case: data begins near step 0; span 0..maxStepHint so
+    // the line GROWS from the left edge as training progresses.
+    // Loaded-model case: data starts mid-run (e.g., step 2956 for a saved
+    // history that was capped at the last 512 points); span first..last
+    // so the line fills the plot instead of leaving 60% empty on the left.
+    const firstStep = this.points[0].step;
     const lastStep = this.points[this.points.length - 1].step;
-    const maxStep = Math.max(1, this.maxStepHint || lastStep);
-    let maxLoss = 0;
-    for (const p of this.points) {
-      maxLoss = Math.max(maxLoss, p.trainLoss, p.valLoss ?? 0);
-    }
-    maxLoss = Math.max(maxLoss, LN_256) * 1.08;
+    const targetMax = this.maxStepHint || lastStep;
+    const liveTraining = firstStep <= Math.max(1, targetMax * 0.05);
+    const minStep = liveTraining ? 0 : firstStep;
+    const maxStep = liveTraining ? Math.max(1, targetMax) : Math.max(firstStep + 1, lastStep);
+    const xSpan = Math.max(1, maxStep - minStep);
 
-    const x = (step: number) => pad.l + (step / maxStep) * plotW;
-    const y = (loss: number) => pad.t + (1 - loss / maxLoss) * plotH;
+    // --- Y range -----------------------------------------------------
+    // Auto-scale to the data with sensible padding. Only EXTEND to
+    // include the ln(256) random baseline (5.55) when the data is
+    // genuinely close to it — otherwise that reference line just stretches
+    // the chart's Y range and makes the descended-loss curve look squished
+    // against the bottom edge. Threshold: include the baseline only when
+    // data reaches at least 60% of it.
+    let dataMax = 0, dataMin = Infinity;
+    for (const p of this.points) {
+      dataMax = Math.max(dataMax, p.trainLoss, p.valLoss ?? 0);
+      dataMin = Math.min(dataMin, p.trainLoss, p.valLoss ?? p.trainLoss);
+    }
+    const includeBaseline = dataMax >= LN_256 * 0.6;
+    let maxLoss = (includeBaseline ? Math.max(dataMax, LN_256) : dataMax) * 1.12;
+    // Lower bound: 0 when data spans most of the range, dataMin-padded
+    // otherwise so a tight clump near 0.9 doesn't get visually crushed.
+    const minLoss = dataMin < dataMax * 0.4 ? 0 : Math.max(0, dataMin - (dataMax - dataMin) * 0.4);
+    const lossSpan = Math.max(0.01, maxLoss - minLoss);
+
+    const x = (step: number) => pad.l + ((step - minStep) / xSpan) * plotW;
+    const y = (loss: number) => pad.t + (1 - (loss - minLoss) / lossSpan) * plotH;
 
     this.drawGrid(pad, plotW, plotH, maxLoss, y);
 
-    // ln(256) random-baseline reference line — soft amber dashes.
-    ctx.save();
-    ctx.strokeStyle = COLOR_BASELINE;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(pad.l, y(LN_256));
-    ctx.lineTo(pad.l + plotW, y(LN_256));
-    ctx.stroke();
-    ctx.restore();
-    ctx.fillStyle = COLOR_BASELINE;
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText("random  ln(256) = 5.55", pad.l + plotW - 132, y(LN_256) - 4);
+    // ln(256) random-baseline reference line — drawn only when the
+    // current Y range actually reaches it. Otherwise it's just a label
+    // outside the visible plot area.
+    if (LN_256 >= minLoss && LN_256 <= maxLoss) {
+      ctx.save();
+      ctx.strokeStyle = COLOR_BASELINE;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y(LN_256));
+      ctx.lineTo(pad.l + plotW, y(LN_256));
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = COLOR_BASELINE;
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.fillText("random  ln(256) = 5.55", pad.l + plotW - 132, y(LN_256) - 4);
+    }
 
     // Quality threshold bands — tells the user what each loss level actually
     // means in human terms. Drawn only when they're within the visible y range.
     const drawThreshold = (lossLevel: number, color: string, label: string) => {
-      if (lossLevel > maxLoss) return;
+      if (lossLevel > maxLoss || lossLevel < minLoss) return;
       ctx.save();
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
@@ -298,9 +324,15 @@ export class LossChart {
     // Legend.
     this.drawLegend(pad);
 
-    // x-axis end label.
+    // X-axis labels — show min step on the left (only when nonzero, to
+    // avoid the redundant "step 0" on live training) and last step on the
+    // right. For loaded models with truncated history, both labels appear.
     ctx.fillStyle = COLOR_AXIS_TEXT;
     ctx.font = "10.5px ui-monospace, monospace";
+    if (minStep > 0) {
+      ctx.textAlign = "left";
+      ctx.fillText(`step ${minStep}`, pad.l, H - 10);
+    }
     ctx.textAlign = "right";
     ctx.fillText(`step ${maxStep}`, pad.l + plotW, H - 10);
     ctx.textAlign = "left";
