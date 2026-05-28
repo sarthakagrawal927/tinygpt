@@ -97,13 +97,17 @@ export function initAnalytics(): boolean {
   }
 }
 
-function capture(event: string, props: object): void {
+export function trackEvent(event: string, properties: Record<string, unknown> = {}): void {
   if (!enabled) return;
   try {
-    posthog.capture(event, props as Record<string, unknown>);
+    posthog.capture(event, { project_id: PROJECT_SLUG, ...properties });
   } catch {
     // Swallow — analytics must never throw into the playground.
   }
+}
+
+function capture(event: string, props: object): void {
+  trackEvent(event, props as Record<string, unknown>);
 }
 
 // --- the three events ----------------------------------------------------
