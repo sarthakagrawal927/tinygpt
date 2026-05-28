@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "All three models share the same architecture (12L, d=256, ctx=256, ~9.6M params, char-level). Each was trained from scratch in this browser for 5000 steps on ~1.1 MB of its corpus. Compare the samples — same machinery, different patterns.",
+  "note": "All four models share the same architecture (12L, d=256, ctx=256, ~9.6M params, char-level). Each was trained from scratch in this browser for 5000 steps on ~1.1 MB of its corpus. Compare the samples — same machinery, different patterns.",
   "models": [
     {
       "id": "shakespeare",
@@ -48,6 +48,22 @@
       "steps": 5000,
       "sample": "def _feed_ids:\n        if feed_id:\n            redializer_feeds(feed_ids)\n                feed_ids = RUserSubscribedusSing(feed_ids, feed_ids, …",
       "fileBytes": 19252805,
+      "gpuBytes": 115304448
+    },
+    {
+      "id": "chat",
+      "name": "Q&A chat",
+      "icon": "💬",
+      "blurb": "User → Assistant Q&A pairs from Dolly-15k. Same arch, learned to respond in chat format.",
+      "corpus": "databricks/databricks-dolly-15k",
+      "corpusUrl": "https://huggingface.co/datasets/databricks/databricks-dolly-15k",
+      "file": "chat.tinygpt",
+      "params": "9.6M",
+      "paramCount": 9608704,
+      "trainLoss": "1.30",
+      "steps": 5000,
+      "sample": "User: Which is the first in 1845 in ways in 1161 in the language of Third. It is one of reason to the Real Bannaro of China? Charlene is also be observiation to the Reduce Bird Bock (201), for food and the microscohology can be professe",
+      "fileBytes": 19248969,
       "gpuBytes": 115304448
     }
   ]
