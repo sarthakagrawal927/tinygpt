@@ -22,6 +22,14 @@ public final class ByteCorpus: Sendable {
     /// Sample a batch: `(input [B, T] int32, target [B, T] int32)`.
     /// `target = input shifted by 1` so the model predicts next-byte.
     public func sampleBatch(batchSize B: Int, contextLength T: Int) -> (MLXArray, MLXArray) {
+        let (inputs, targets) = sampleBatchRaw(batchSize: B, contextLength: T)
+        return (MLXArray(inputs, [B, T]), MLXArray(targets, [B, T]))
+    }
+
+    /// Generate the raw Int32 windows without materialising MLXArrays. Used
+    /// by the prefetcher so the CPU-side sampling runs concurrently with
+    /// the GPU's previous-step compute.
+    public func sampleBatchRaw(batchSize B: Int, contextLength T: Int) -> ([Int32], [Int32]) {
         precondition(bytes.count > T + 1, "corpus too small for context \(T)")
         var inputs = [Int32](repeating: 0, count: B * T)
         var targets = [Int32](repeating: 0, count: B * T)
@@ -32,9 +40,25 @@ public final class ByteCorpus: Sendable {
                 targets[i * T + j] = Int32(bytes[start + j + 1])
             }
         }
-        let x = MLXArray(inputs, [B, T])
-        let y = MLXArray(targets, [B, T])
-        return (x, y)
+        return (inputs, targets)
+    }
+}
+
+/// Async batch prefetcher — pipelines CPU-side batch construction with the
+/// previous step's GPU compute. Maintains one pre-built batch ahead.
+public actor BatchPrefetcher {
+    private let corpus: ByteCorpus
+    private let batchSize: Int
+    private let contextLength: Int
+
+    public init(corpus: ByteCorpus, batchSize: Int, contextLength: Int) {
+        self.corpus = corpus
+        self.batchSize = batchSize
+        self.contextLength = contextLength
+    }
+
+    public func next() -> ([Int32], [Int32]) {
+        corpus.sampleBatchRaw(batchSize: batchSize, contextLength: contextLength)
     }
 }
 

@@ -44,4 +44,18 @@ cat > "$OUT/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+
+# Ad-hoc sign the bundle so macOS lets it launch without Gatekeeper
+# prompting. Real signing requires a Developer ID; for local builds
+# the empty-identity signature is enough to clear the immediate launch
+# block (the bundle still won't pass notarization, but it runs).
+codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || true
+
+# Strip the com.apple.quarantine extended attribute that downloads /
+# xcodebuild outputs sometimes inherit.
+xattr -dr com.apple.quarantine "$OUT" 2>/dev/null || true
+
 echo "wrote $OUT"
+echo ""
+echo "To launch: open '$OUT'"
+echo "Or double-click in Finder. First time may need right-click → Open."

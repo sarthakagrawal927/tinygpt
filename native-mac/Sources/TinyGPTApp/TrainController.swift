@@ -26,13 +26,16 @@ final class TrainController: ObservableObject {
     }
 
     /// Picks the user can choose between. Each is a (name, config) pair.
+    /// Browser-reachable sizes at the top; Mac-only behemoth sizes below.
     static let presets: [(name: String, cfg: ModelConfig)] = [
-        ("Tiny",  ModelConfig(vocabSize: 256, contextLength: 128, nLayers: 4,
-                              nHeads: 4, dModel: 128, dMlp: 512)),
-        ("Small", ModelConfig(vocabSize: 256, contextLength: 256, nLayers: 6,
-                              nHeads: 6, dModel: 192, dMlp: 768)),
-        ("Huge",  ModelConfig.huge),
-        ("Mega",  ModelConfig.mega),
+        ("Tiny ·   842K",  ModelConfig(vocabSize: 256, contextLength: 128, nLayers: 4,
+                                       nHeads: 4, dModel: 128, dMlp: 512)),
+        ("Small · 2.4M",   ModelConfig(vocabSize: 256, contextLength: 256, nLayers: 6,
+                                       nHeads: 6, dModel: 192, dMlp: 768)),
+        ("Huge ·  9.6M",   ModelConfig.huge),
+        ("Mega ·   76M",   ModelConfig.mega),
+        ("Behemoth · 404M (Mac only)",  ModelConfig.behemoth),
+        ("Titan · 1.3B (Mac only)",     ModelConfig.titan),
     ]
 
     private var trainTask: Task<Void, Never>? = nil
