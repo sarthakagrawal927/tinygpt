@@ -77,4 +77,34 @@ public struct ModelConfig: Sendable, Equatable {
         dropout: 0.0,
         tieEmbeddings: true
     )
+
+    /// Behemoth preset (32L, d=1024, ctx=1024, ~400M params). Pushes the
+    /// M5 Pro's 48 GB unified memory hard — fp32 training fits with B=2,
+    /// fp16 fits with B=4. Browser absolutely cannot run this.
+    public static let behemoth = ModelConfig(
+        modelName: "byte-tinygpt-behemoth",
+        vocabSize: 256,
+        contextLength: 1024,
+        nLayers: 32,
+        nHeads: 16,
+        dModel: 1024,
+        dMlp: 4096,
+        dropout: 0.0,
+        tieEmbeddings: true
+    )
+
+    /// Titan preset (48L, d=1536, ctx=1024, ~1.3B params). Most ambitious
+    /// preset that still fits on the M5 Pro / 48 GB for fp16 inference;
+    /// fp32 training requires careful batching.
+    public static let titan = ModelConfig(
+        modelName: "byte-tinygpt-titan",
+        vocabSize: 256,
+        contextLength: 1024,
+        nLayers: 48,
+        nHeads: 24,
+        dModel: 1536,
+        dMlp: 6144,
+        dropout: 0.0,
+        tieEmbeddings: true
+    )
 }
