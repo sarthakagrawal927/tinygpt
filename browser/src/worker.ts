@@ -52,8 +52,24 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case "sample": void doSample(msg.prompt, msg.tokens, msg.temperature); break;
     case "restore": void doRestore(msg.state, msg.config); break;
     case "inspect": void doInspect(msg.prompt, msg.topK); break;
+    case "offload": offloadModel(); break;
   }
 };
+
+/** Free the loaded model's GPU buffers. No-op if no model is loaded or
+ *  if a training run is currently active (would break the in-flight
+ *  forward/backward). Posts model_offloaded back so main can update its
+ *  UI (hide GPU-mem pill, disable Generate, show "freed after idle" hint). */
+function offloadModel(): void {
+  if (training) return; // can't free under an active run
+  if (gpuModel) {
+    gpuModel.destroy();
+    gpuModel = null;
+  }
+  // Don't free the WASM-backed `model` — it's smaller, the page might still
+  // want to use it, and the destroy path is different. Future work.
+  post({ type: "model_offloaded" });
+}
 
 async function runTraining(text: string, cfg: RunConfig): Promise<void> {
   if (training) {

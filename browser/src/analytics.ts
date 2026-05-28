@@ -177,8 +177,7 @@ export function capturePageCrash(
   source: "window_error" | "unhandled_rejection",
 ): void {
   const payload = {
-    project: PROJECT_SLUG,
-    project_slug: PROJECT_SLUG,
+    project_id: PROJECT_SLUG,
     route: route(),
     source,
     message: messageFrom(error),

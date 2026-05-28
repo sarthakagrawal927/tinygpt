@@ -61,7 +61,12 @@ export type ToWorker =
   | { type: "restore"; state: ArrayBuffer; config: RunConfig }
   // "Watch the model think" — single introspection forward over `prompt`.
   // Returns top-K next-token probabilities per position + last-layer attention.
-  | { type: "inspect"; prompt: Uint8Array; topK: number };
+  | { type: "inspect"; prompt: Uint8Array; topK: number }
+  // Auto-offload: main thread asks worker to free the loaded model's GPU
+  // buffers after N minutes of inactivity. No-op when no model is loaded
+  // or when training is in flight. Worker replies with "model_offloaded"
+  // when teardown completes (or omits the reply if nothing to free).
+  | { type: "offload" };
 
 /** Per-position introspection payload (one entry per token in the inspect prompt). */
 export interface InspectResult {
@@ -100,4 +105,8 @@ export type FromWorker =
   // f16Storage is set once GpuModel.prepareForInference() returns true
   // (numerics gate passed AND weights packed). cooperativeMatrix will land
   // here when #92 ships. Sent at most once per loaded model.
-  | { type: "gpu_caps"; caps: { f16Storage?: boolean; cooperativeMatrix?: boolean } };
+  | { type: "gpu_caps"; caps: { f16Storage?: boolean; cooperativeMatrix?: boolean } }
+  // Fires when the worker has destroyed its loaded model (auto-offload).
+  // Main thread hides the GPU-mem pill + disables Generate + shows a small
+  // "model freed after idle" toast with a "reload" affordance.
+  | { type: "model_offloaded" };

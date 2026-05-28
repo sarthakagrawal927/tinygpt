@@ -29,7 +29,7 @@ import {
   formatParams,
   headsFor,
 } from "./sizing";
-import { loadRun, loadState, requestDurableStorage, saveRun, saveState } from "./storage";
+import { loadCachedGalleryModel, loadRun, loadState, requestDurableStorage, saveCachedGalleryModel, saveRun, saveState } from "./storage";
 import { markTourSeen, startTour } from "./tour";
 import { DEFAULT_CONFIG, type FromWorker, type InspectResult, type RunConfig, type ToWorker } from "./types";
 import {
@@ -810,6 +810,10 @@ byId<HTMLButtonElement>("reset").addEventListener("click", () => {
   // means the user comes back later thinking the page is in a weird
   // half-state.
   setTimeout(() => setModelStatus(""), 2400);
+
+  // Cancel any in-flight gallery download — user explicitly reset, so
+  // we shouldn't finish loading a model they no longer want.
+  if (galleryFetchAbort) { galleryFetchAbort.abort(); galleryFetchAbort = null; }
 
   // Navigate back to the Setup screen (Step 1) and bring back the
   // "Load from gallery" banner so the user has a clear next move.
@@ -2295,6 +2299,18 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
           .__tgUpdateGpuAccelPills?.({ cooperativeMatrix: true });
       }
       break;
+    case "model_offloaded":
+      // Worker freed the loaded model's GPU buffers after idle. Reflect
+      // that in the UI: GPU mem pill goes away, sample/generate gated
+      // until the user reloads, status whispers a one-liner. The user
+      // can re-open the gallery and click any card to bring the model
+      // back (HTTP cache makes the refetch fast).
+      latestState = null;
+      latestStateConfig = null;
+      setGpuMemPill(null);
+      els.sample.disabled = true;
+      setStatus("model freed after idle · re-load from gallery to use again");
+      break;
     case "done": {
       setRunning(false);
       stopElapsedClock();
@@ -2743,6 +2759,7 @@ void init().then(() => {
   setupDefaultCorpus();
   setupScreens();
   setupSystemPressure();
+  setupAutoOffload();
   // Mark landing animation as done after first paint — subsequent navigations
   // skip the brand-draw animation (it's a one-time wow).
   setTimeout(() => document.body.classList.add("landing-done"), 2200);
@@ -2895,6 +2912,42 @@ function setupScreens(): void {
 // On browsers without PressureObserver we leave it hidden silently rather
 // than fake a value — the rest of the live-stats panel already tells the
 // user training is in flight.
+/** Auto-offload the loaded model after N minutes of user inactivity.
+ *  A GpuModel pins ~110 MB of GPU memory just sitting there; if the user
+ *  walked away or is reading docs, that memory should go back to the OS.
+ *  Any interaction (click, keypress, scroll, generation) resets the timer.
+ *  Training in flight blocks offload — the worker would crash mid-step. */
+function setupAutoOffload(): void {
+  const IDLE_MS = 5 * 60 * 1000;          // 5 minutes
+  const CHECK_INTERVAL_MS = 30 * 1000;    // poll every 30 sec
+  let lastActivity = Date.now();
+
+  // Any meaningful user activity resets the timer. `passive: true` so we
+  // don't slow down scrolling; we only need the timestamp, no preventDefault.
+  const bump = () => { lastActivity = Date.now(); };
+  ["mousedown", "keydown", "touchstart", "scroll", "pointerdown"].forEach((ev) => {
+    document.addEventListener(ev, bump, { passive: true });
+  });
+  // Also bump on workflow milestones — training start / sample click.
+  els.start.addEventListener("click", bump);
+  els.sample.addEventListener("click", bump);
+
+  setInterval(() => {
+    // Only offload if (a) we have a loaded model, (b) we're idle past the
+    // threshold, (c) no training is running. The training check is via
+    // the stop button being enabled — Reset re-disables it.
+    const haveModel = latestState !== null;
+    const trainingActive = !els.stop.disabled;
+    const idleEnough = Date.now() - lastActivity > IDLE_MS;
+    if (haveModel && idleEnough && !trainingActive) {
+      send({ type: "offload" });
+      // Don't post the toast here — wait for "model_offloaded" reply so we
+      // don't lie about the state in case the worker bails (e.g., race
+      // with a sample request that just landed).
+    }
+  }, CHECK_INTERVAL_MS);
+}
+
 function setupSystemPressure(): void {
   const chip = document.getElementById("systemPressure");
   const label = document.getElementById("pressureLabel");
@@ -3168,11 +3221,23 @@ function renderGallery(
   }
 }
 
+/** AbortController for an in-flight gallery download. If the user hits
+ *  Reset (or clicks a different gallery card) while a fetch is in flight,
+ *  we abort the dead one so it doesn't burn bandwidth + finish loading
+ *  the wrong model under the user's feet. */
+let galleryFetchAbort: AbortController | null = null;
+
 async function loadGalleryCard(
   card: HTMLButtonElement,
   m: GalleryModel,
   dialog: HTMLDialogElement,
 ): Promise<void> {
+  // Cancel any prior in-flight gallery fetch — user clicked a different
+  // card, or Reset cleared the previous one, or any other state change.
+  if (galleryFetchAbort) galleryFetchAbort.abort();
+  galleryFetchAbort = new AbortController();
+  const signal = galleryFetchAbort.signal;
+
   // Disable all cards while one is loading — prevents double-click into a
   // half-loaded second model that would corrupt the worker state.
   const allCards = dialog.querySelectorAll<HTMLButtonElement>(".gallery-card");
@@ -3182,10 +3247,19 @@ async function loadGalleryCard(
   const originalSample = sampleSlot?.textContent ?? "";
   if (sampleSlot) sampleSlot.textContent = "loading…";
   try {
-    const resp = await fetch(`/gallery/${m.file}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const blob = await resp.blob();
-    const file = new File([blob], m.file, { type: "application/octet-stream" });
+    // OPFS cache hit? Skip the network entirely — gallery files are ~18 MB,
+    // and after the first download we own the bytes locally. Falls through
+    // to network on cache miss / OPFS off / quota error / corrupted file.
+    let bytes: Uint8Array | null = await loadCachedGalleryModel(m.file);
+    if (!bytes) {
+      const resp = await fetch(`/gallery/${m.file}`, { signal });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      bytes = new Uint8Array(buf);
+      // Fire-and-forget write to OPFS — never block model load on cache write.
+      void saveCachedGalleryModel(m.file, bytes);
+    }
+    const file = new File([bytes as Uint8Array<ArrayBuffer>], m.file, { type: "application/octet-stream" });
     await loadModelFromFile(file, `${m.name} (gallery)`);
     // Surface the loaded model's GPU footprint as a live pill in the
     // capability cluster — answers "how much of my GPU is being used".

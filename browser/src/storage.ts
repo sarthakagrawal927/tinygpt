@@ -99,6 +99,53 @@ export async function loadState(): Promise<Uint8Array | null> {
   }
 }
 
+// --- Gallery model OPFS cache ---------------------------------------------
+// Gallery model files are ~18 MB each; HTTP cache + Cloudflare edge cache
+// already make repeat fetches reasonable. OPFS is the next layer: cache
+// the bytes so a returning user doesn't pay the network at all (and works
+// fully offline once any model has been loaded once). Files live under a
+// `gallery/` sub-directory in OPFS root so a wipe of one model doesn't
+// affect the saved-run state above.
+
+const GALLERY_DIR = "gallery";
+
+/** Read a gallery model from OPFS cache. Returns null on miss / OPFS off. */
+export async function loadCachedGalleryModel(
+  filename: string,
+): Promise<Uint8Array | null> {
+  if (!opfsAvailable()) return null;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle(GALLERY_DIR);
+    const handle = await dir.getFileHandle(filename);
+    const buf = await (await handle.getFile()).arrayBuffer();
+    return new Uint8Array(buf);
+  } catch {
+    return null;
+  }
+}
+
+/** Persist a gallery model to OPFS cache. Returns false on failure (quota,
+ *  OPFS off, etc.); failures are non-fatal — the caller already has the
+ *  bytes from network, the next visit just re-fetches. */
+export async function saveCachedGalleryModel(
+  filename: string,
+  bytes: Uint8Array,
+): Promise<boolean> {
+  if (!opfsAvailable()) return false;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle(GALLERY_DIR, { create: true });
+    const handle = await dir.getFileHandle(filename, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(bytes as Uint8Array<ArrayBuffer>);
+    await writable.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Delete the persisted run (snapshot + state blob), if any. */
 export async function clearRun(): Promise<void> {
   if (!opfsAvailable()) return;

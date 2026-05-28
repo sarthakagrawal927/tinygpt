@@ -621,6 +621,25 @@ export class GpuModel {
     return total / N;
   }
 
+  /** Free every GPU resource this model owns. Use case: auto-offload after
+   *  the user has been idle for N minutes — the model occupies ~110 MB of
+   *  GPU memory just sitting there. After destroy() the instance is dead:
+   *  any subsequent method call will throw or produce garbage. Callers
+   *  should null out their reference and reload the model from scratch
+   *  (gallery refetch or OPFS restore) when the user comes back. */
+  destroy(): void {
+    for (const p of this.params) {
+      p.w.destroy();
+      p.m.destroy();
+      p.v.destroy();
+      if (p.wF16) { p.wF16.destroy(); p.wF16 = null; }
+    }
+    this.params.length = 0;
+    this.layers.length = 0;
+    this.scratch.length = 0;
+    this.ops.destroy();
+  }
+
   // Return every per-step tensor to the buffer pool (not destroyed) so the
   // next step reuses the buffers — after step 1, a run does no allocation.
   private freeScratch(): void {

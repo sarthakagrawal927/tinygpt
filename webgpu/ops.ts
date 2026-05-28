@@ -87,6 +87,19 @@ export class GpuOps {
     public f16StorageActive: boolean,
   ) {}
 
+  /** Destroy every GPU buffer this GpuOps owns — pool, dummies, per-batch
+   *  uniforms. Called from GpuModel.destroy() on auto-offload-after-idle.
+   *  Pipelines themselves are not destroyed (no API for that — they're GC'd
+   *  when the device is dropped); the WebGPU runtime cleans them up on
+   *  device loss. */
+  destroy(): void {
+    this.pool.destroyAll();
+    for (const d of this.dummies) d.destroy();
+    this.dummies.length = 0;
+    for (const u of this.uniforms) u.destroy();
+    this.uniforms.length = 0;
+  }
+
   /** Start recording a batch of dispatches into a single command buffer. */
   beginBatch(): void {
     this.encoder = this.device.createCommandEncoder();

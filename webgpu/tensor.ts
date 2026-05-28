@@ -189,6 +189,16 @@ export class BufferPool {
     }
     list.push(buffer);
   }
+
+  /** Destroy every pooled buffer. Called as part of GpuOps.destroy() during
+   *  auto-offload-after-idle and other teardown paths. After this, the pool
+   *  is empty and acquire() will allocate fresh buffers if used again. */
+  destroyAll(): void {
+    for (const list of this.free.values()) {
+      for (const buf of list) buf.destroy();
+    }
+    this.free.clear();
+  }
 }
 
 /** A flat float32 tensor living in a GPU storage buffer. */
