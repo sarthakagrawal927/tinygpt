@@ -147,6 +147,109 @@ fn matmul_blocked_f16(
   }
 }
 
+// ===========================================================================
+// Backward dA = dY @ W^T (matmulAbt variant with f16-packed weight)
+//
+// matmulAbt's convention: output[m, n] = sum_k A[m, k] * B[n, k]. For our
+// backward pass with B = W (the weight stored as [orig_K, orig_N] row-major,
+// contiguous on orig_N), the call is matmulAbt(dY, W, M=orig_M, K=orig_N,
+// N=orig_K). So matmulAbt's K is the inner dim (= orig_N = the contiguous
+// packing axis), and matmulAbt's N is the row count of W.
+//
+// In this kernel:
+//   bRow ∈ [0, matmulAbt_N) = [0, orig_K) — a row in W
+//   bCol ∈ [0, matmulAbt_K) = [0, orig_N) — a column in W (packed axis)
+//   W[bRow, bCol] = unpack2x16float(g1[bRow * halfK + bCol/2]).{x or y}
+//
+// Same blocked4 algorithm as matmul_abt_blocked in train.wgsl (16×16
+// workgroup, 4×4 register block per thread, 64×64 output tile). Only the
+// B-side global load is changed to unpack from packed-half storage.
+var<workgroup> mab_tileA_f16: array<array<f32, 16>, 64>;  // [m][k]
+var<workgroup> mab_tileB_f16: array<array<f32, 64>, 16>;  // [k][n] but loaded from W[n,k]
+
+@compute @workgroup_size(16, 16)
+fn matmul_abt_blocked_f16(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let M = p.a; let K = p.b; let N = p.c;  // matmulAbt convention: output [M, N], inner K
+  let halfK = K / 2u;
+  let blockRow = wid.x * 64u;
+  let blockCol = wid.y * 64u;
+  let lrow = lid.x; let lcol = lid.y;
+
+  var acc: array<array<f32, 4>, 4>;
+  for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+    for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+      acc[i][j] = 0.0;
+    }
+  }
+
+  let nTiles = (K + 15u) / 16u;
+  for (var t: u32 = 0u; t < nTiles; t = t + 1u) {
+    let kBase = t * 16u;
+
+    // Load A[blockRow + lrow*4 + i, kBase + lcol] into mab_tileA_f16 — f32 scalar.
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+      let aRow = blockRow + lrow * 4u + i;
+      let aCol = kBase + lcol;
+      var v: f32 = 0.0;
+      if (aRow < M && aCol < K) { v = g0[aRow * K + aCol]; }
+      mab_tileA_f16[lrow * 4u + i][lcol] = v;
+    }
+
+    // Load B[blockCol + lcol*4 + j, kBase + lrow] — B is W with [N, K] view,
+    // stored as packed-half along K. Each thread reads 4 elements (one row of
+    // the B-tile slice it owns); unpack-select per element.
+    for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+      let bRow = blockCol + lcol * 4u + j;   // row in W (orig_K direction)
+      let bCol = kBase + lrow;               // column in W (orig_N, packed)
+      var v: f32 = 0.0;
+      if (bRow < N && bCol < K) {
+        let bColPair = bCol / 2u;
+        let bIsHigh = (bCol & 1u) == 1u;
+        let pair = unpack2x16float(g1[bRow * halfK + bColPair]);
+        v = select(pair.x, pair.y, bIsHigh);
+      }
+      mab_tileB_f16[lrow][lcol * 4u + j] = v;
+    }
+    workgroupBarrier();
+
+    let myA0 = lrow * 4u;
+    let myB0 = lcol * 4u;
+    for (var k: u32 = 0u; k < 16u; k = k + 1u) {
+      let a0 = mab_tileA_f16[myA0 + 0u][k];
+      let a1 = mab_tileA_f16[myA0 + 1u][k];
+      let a2 = mab_tileA_f16[myA0 + 2u][k];
+      let a3 = mab_tileA_f16[myA0 + 3u][k];
+      let b0 = mab_tileB_f16[k][myB0 + 0u];
+      let b1 = mab_tileB_f16[k][myB0 + 1u];
+      let b2 = mab_tileB_f16[k][myB0 + 2u];
+      let b3 = mab_tileB_f16[k][myB0 + 3u];
+      acc[0][0] = acc[0][0] + a0 * b0; acc[0][1] = acc[0][1] + a0 * b1;
+      acc[0][2] = acc[0][2] + a0 * b2; acc[0][3] = acc[0][3] + a0 * b3;
+      acc[1][0] = acc[1][0] + a1 * b0; acc[1][1] = acc[1][1] + a1 * b1;
+      acc[1][2] = acc[1][2] + a1 * b2; acc[1][3] = acc[1][3] + a1 * b3;
+      acc[2][0] = acc[2][0] + a2 * b0; acc[2][1] = acc[2][1] + a2 * b1;
+      acc[2][2] = acc[2][2] + a2 * b2; acc[2][3] = acc[2][3] + a2 * b3;
+      acc[3][0] = acc[3][0] + a3 * b0; acc[3][1] = acc[3][1] + a3 * b1;
+      acc[3][2] = acc[3][2] + a3 * b2; acc[3][3] = acc[3][3] + a3 * b3;
+    }
+    workgroupBarrier();
+  }
+
+  for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+    let outRow = blockRow + lrow * 4u + i;
+    if (outRow >= M) { continue; }
+    for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+      let outCol = blockCol + lcol * 4u + j;
+      if (outCol < N) {
+        g2[outRow * N + outCol] = acc[i][j];
+      }
+    }
+  }
+}
+
 // Pack a f32 weight buffer into a packed-f16 storage buffer. Reads from g0
 // (length M*N f32) and writes to g1 (length M*N/2 u32). Stride along the
 // last (N) axis. N must be even.

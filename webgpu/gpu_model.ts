@@ -259,8 +259,16 @@ export class GpuModel {
     x: GpuTensor, w: Param, dy: GpuTensor, N: number, cin: number, cout: number,
     grads: Map<Param, GpuTensor>, wOut: Param, bOut: Param,
   ): GpuTensor {
-    const { dA, dB } = this.ops.matmulBackward(x, w.w, dy, N, cin, cout);
-    this.keep(dA); this.keep(dB);
+    // dB = x^T @ dy never reads the weight — always stays on f32 vec4.
+    const dB = this.keep(this.ops.matmulAtb(x, dy, cin, N, cout));
+    // dA = dy @ W^T reads the weight. If the f16-storage path is active
+    // and this weight has a packed mirror, dispatch the f16 variant.
+    let dA: GpuTensor;
+    if (this.useF16Storage && w.wF16 && w.matShape && cin % 2 === 0 && cout % 2 === 0) {
+      dA = this.keep(this.ops.matmulAbtF16Weight(dy, w.wF16, N, cout, cin));
+    } else {
+      dA = this.keep(this.ops.matmulAbt(dy, w.w, N, cout, cin));
+    }
     grads.set(wOut, dB);
     grads.set(bOut, this.keep(this.ops.biasGrad(dy, N, cout)));
     return dA;
@@ -492,10 +500,46 @@ export class GpuModel {
     return { tokens, topK, attention };
   }
 
+  /** Repack every matmul-shaped weight's f16 mirror from its (just-updated)
+   *  f32 source. Called at the end of trainStep after AdamW has written
+   *  fresh values to p.w. Cost: one bandwidth-bound dispatch per packed
+   *  weight; total work is roughly one pass through the weight buffer set
+   *  per step (~10MB on the Huge preset → ~0.07ms on M-series). The
+   *  alternative (invalidating + falling back to f32 for training) would
+   *  leave the matmul reads on f32 and forfeit the bandwidth win on the
+   *  forward+dA matmuls of training. */
+  private repackF16Mirrors(): void {
+    if (!this.useF16Storage) return;
+    for (const p of this.params) {
+      if (!p.wF16 || !p.matShape) continue;
+      const [rows, cols] = p.matShape;
+      this.ops.packToF16(p.w.buffer, p.wF16, rows, cols);
+    }
+  }
+
   /** One training step: forward, cross-entropy, backward, AdamW. Returns loss. */
   async trainStep(
     ids: Float32Array, targets: Float32Array, batch: number, lr: number,
   ): Promise<number> {
+    // Lazy f16-storage activation: the ops-level numerics gate runs at
+    // construction time and settles independently. If it passed and we
+    // haven't yet packed weights for this model, do so on the first
+    // training step. After that, useF16Storage stays true; per-step
+    // overhead is the repackF16Mirrors() pass at the bottom of this method.
+    // No-op (and no await) on subsequent steps because prepareForInference
+    // short-circuits when useF16Storage is already true.
+    if (!this.useF16Storage) {
+      // prepareForInference is idempotent and resolves false fast when the
+      // gate failed, so this won't slow training on devices where the f16
+      // path isn't activating.
+      await this.prepareForInference();
+    }
+    // If the f16-storage path is active, training reads weights from the
+    // packed mirrors set up by prepareForInference. We keep those mirrors
+    // in sync at the END of each step (after AdamW writes new values to
+    // p.w). The forward + dA matmuls within this step still read the
+    // mirror state from the previous step's repack, which exactly matches
+    // p.w pre-AdamW — correct semantics.
     const { vocab: V, ctx: T, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
     const grads = new Map<Param, GpuTensor>();
 
@@ -563,6 +607,11 @@ export class GpuModel {
       this.ops.adamwStep(p.w, g, p.m, p.v, p.size, this.stepCount, lr,
         p.decay ? 0.1 : 0.0);
     }
+
+    // Keep the f16 mirrors in sync with the just-updated f32 weights so the
+    // next step's forward + dA matmuls see fresh values. No-op when
+    // useF16Storage is false (training on the f32 vec4 path).
+    this.repackF16Mirrors();
 
     this.ops.endBatch(); // submit the whole step at once
     const lossArr = await ce.loss.download();

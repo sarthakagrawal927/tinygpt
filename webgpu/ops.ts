@@ -38,7 +38,7 @@ const VEC4_ENTRIES = ["matmul_blocked_vec4"] as const;
 /** Entry points that live in train_f16.wgsl — same bind layout, but g1 is
  *  declared as array<u32> for packed-f16 weight storage. K and N must be
  *  even. Gated on a startup numerics check (see verifyF16Storage). */
-const F16_ENTRIES = ["matmul_blocked_f16", "pack_to_f16"] as const;
+const F16_ENTRIES = ["matmul_blocked_f16", "matmul_abt_blocked_f16", "pack_to_f16"] as const;
 /** Flash-Attention-2-style fused attention forward. Same bind layout as
  * train.wgsl (g0=q g1=k g2=v g3=attn g4=ctx, p.a=B p.b=T p.c=C p.d=H
  * p.fa=1/sqrt(hd)). Workgroup-cooperative — one workgroup per
@@ -266,19 +266,85 @@ export class GpuOps {
     });
     this.packToF16(b.buffer, bPackedBuf, K, N);
 
-    // f16-storage matmul.
+    // f16-storage forward matmul.
     const cF16 = this.matmulF16Weight(a, bPackedBuf, M, K, N);
     const f16Out = await cF16.download();
 
-    // Reference magnitude scale — used to floor the relative-error denom
-    // so near-zero outputs (where the dot-product cancels) don't inflate
-    // the relative-error number into the stratosphere.
+    // Compare forward outputs.
+    const fwdResult = this.compareF16Output(refOut, f16Out, "fwd");
+    cF16.recycle();
+
+    // --- Backward matmul check: dA = dC @ B^T ---
+    // Use the SAME packed buffer (the packing is layout-agnostic between
+    // the forward matmul and matmulAbt variants — both index the same
+    // packed-along-N storage, just with different row/col interpretations).
+    // Build a fresh A_bwd to keep the gate independent of the forward run.
+    const Mb = 64, Kb = 128, Nb = 64; // matmulAbt: output [Mb, Nb], inner Kb
+    // For matmulAbtF16Weight to share a packed B buffer, we need K (= Kb) to
+    // match the packing axis of the original weight (= N of the [K, N] view).
+    // So the "weight" we pack is shape [Nb, Kb] with Kb as the contiguous /
+    // packed axis. Reuse bData but re-pack with that shape.
+    const aBwdData = new Float32Array(Mb * Kb);
+    const wBwdData = new Float32Array(Nb * Kb);
+    for (let i = 0; i < aBwdData.length; i++) aBwdData[i] = rand();
+    for (let i = 0; i < wBwdData.length; i++) wBwdData[i] = rand();
+
+    const aBwd = new GpuTensor(this.device, Mb * Kb);
+    aBwd.upload(aBwdData);
+    const wBwd = new GpuTensor(this.device, Nb * Kb);
+    wBwd.upload(wBwdData);
+
+    // f32 reference: matmulAbt(aBwd, wBwd) = aBwd @ wBwd^T → [Mb, Nb]
+    const cAbtF32 = this.matmulAbt(aBwd, wBwd, Mb, Kb, Nb);
+    const abtRefOut = await cAbtF32.download();
+    cAbtF32.recycle();
+
+    // Pack wBwd along its second axis (Kb), matching what the backward
+    // kernel expects (it indexes packed by [bRow * halfK + bCol/2]).
+    const wBwdPackedBuf = this.device.createBuffer({
+      size: Nb * Kb * 2,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.packToF16(wBwd.buffer, wBwdPackedBuf, Nb, Kb);
+
+    const cAbtF16 = this.matmulAbtF16Weight(aBwd, wBwdPackedBuf, Mb, Kb, Nb);
+    const abtF16Out = await cAbtF16.download();
+    const bwdResult = this.compareF16Output(abtRefOut, abtF16Out, "bwd");
+
+    aBwd.destroy();
+    wBwd.destroy();
+    wBwdPackedBuf.destroy();
+    cAbtF16.recycle();
+
+    // Both forward AND backward must pass for the f16 path to activate.
+    const passed = fwdResult.passed && bwdResult.passed;
+    console.info(
+      `[ops] f16-storage gate (fwd): ${fwdResult.summary}`,
+    );
+    console.info(
+      `[ops] f16-storage gate (bwd): ${bwdResult.summary}`,
+    );
+    console.info(
+      `[ops] f16-storage gate verdict: ${passed ? "PASS — f16 path active" : "FAIL — staying on f32"}`,
+    );
+
+    this.f16StorageActive = passed;
+    a.destroy();
+    b.destroy();
+    bPackedBuf.destroy();
+    cF32.recycle();
+    return passed;
+  }
+
+  /** Shared comparison helper for the f16 gate. Magnitude-aware tolerance,
+   *  same thresholds for both forward and backward. */
+  private compareF16Output(
+    refOut: Float32Array, f16Out: Float32Array, label: string,
+  ): { passed: boolean; summary: string } {
     let sumAbsRef = 0;
     for (let i = 0; i < refOut.length; i++) sumAbsRef += Math.abs(refOut[i]);
     const meanAbsRef = sumAbsRef / refOut.length;
     const denomFloor = Math.max(meanAbsRef * 0.01, 1e-6);
-
-    // Element-wise comparison with magnitude-aware tolerance.
     let maxAbs = 0, maxRel = 0, sumRel = 0;
     for (let i = 0; i < refOut.length; i++) {
       const r = refOut[i];
@@ -291,28 +357,15 @@ export class GpuOps {
       sumRel += rel;
     }
     const meanRel = sumRel / refOut.length;
-    const maxAbsThreshold = meanAbsRef * 0.01; // 1% of typical magnitude
-
-    // Both must hold. Mean relative error is the primary signal; max
-    // absolute error catches one-off blow-ups without being fooled by
-    // near-zero outputs.
+    const maxAbsThreshold = meanAbsRef * 0.01;
     const passed = maxAbs < maxAbsThreshold && meanRel < 5e-3;
-    console.info(
-      `[ops] f16-storage gate: ` +
+    const summary =
       `mean|ref|=${meanAbsRef.toExponential(2)}, ` +
       `max_abs=${maxAbs.toExponential(2)} (limit ${maxAbsThreshold.toExponential(2)}), ` +
       `mean_rel=${(meanRel * 100).toFixed(3)}% (limit 0.500%), ` +
       `max_rel=${(maxRel * 100).toFixed(2)}% — ` +
-      `${passed ? "PASS — f16 path active" : "FAIL — staying on f32 vec4"}`,
-    );
-
-    this.f16StorageActive = passed;
-    a.destroy();
-    b.destroy();
-    bPackedBuf.destroy();
-    cF32.recycle();
-    cF16.recycle();
-    return passed;
+      `${passed ? "PASS" : "FAIL"} [${label}]`;
+    return { passed, summary };
   }
 
   private newTensor(size: number, label: string): GpuTensor {
@@ -450,6 +503,35 @@ export class GpuOps {
     const c = this.newTensor(M * N, "matmul.f16.C");
     this.dispatchMixed(
       "matmul_blocked_f16",
+      [a.buffer, bPackedF16, c.buffer],
+      { a: M, b: K, c: N },
+      Math.ceil(M / 64), Math.ceil(N / 64),
+    );
+    return c;
+  }
+
+  /** Backward dA = dC @ B^T where B is a pre-packed f16 storage buffer
+   *  (the weight, packed along its N axis at upload time). Same shape
+   *  contract as matmulAbt(a, b, M, K, N) → output is [M, N], inner is K.
+   *
+   *  For a forward layer y = x @ w, the backward call is
+   *  matmulAbt(dy, w, batchT, cout, cin). With matmulAbt's convention:
+   *  M = batchT, K = cout (the original N-axis of w), N = cin (rows of w).
+   *  The kernel reads w packed along its original N-axis (= matmulAbt's K).
+   *  Same K-evenness requirement as matmulF16Weight.
+   *
+   *  Activates only when the f16-storage gate's matmulAbt-side check has
+   *  also passed (see verifyF16Storage). Callers should consult
+   *  f16StorageActive before dispatching. */
+  matmulAbtF16Weight(
+    a: GpuTensor, bPackedF16: GPUBuffer, M: number, K: number, N: number,
+  ): GpuTensor {
+    if (K % 2 !== 0) {
+      throw new Error(`matmulAbtF16Weight: K must be even (got K=${K})`);
+    }
+    const c = this.newTensor(M * N, "matmul.abt.f16.C");
+    this.dispatchMixed(
+      "matmul_abt_blocked_f16",
       [a.buffer, bPackedF16, c.buffer],
       { a: M, b: K, c: N },
       Math.ceil(M / 64), Math.ceil(N / 64),
