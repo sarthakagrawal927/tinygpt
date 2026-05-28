@@ -36,6 +36,8 @@ struct TinyGPT {
             Eval.run(args: Array(args.dropFirst()))
         case "finetune":
             Finetune.run(args: Array(args.dropFirst()))
+        case "compare":
+            Compare.run(args: Array(args.dropFirst()))
         case "sample":
             Sample.run(args: Array(args.dropFirst()))
         case "debug-names":

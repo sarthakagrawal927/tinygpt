@@ -23,6 +23,7 @@ enum Eval {
     static func run(args: [String]) {
         var path: String?
         var corpusPath: String?
+        var loraPath: String? = nil
         var nBatches = 50
         var batchSize: Int? = nil
         var seed: UInt32 = 0
@@ -30,6 +31,7 @@ enum Eval {
         while i < args.count {
             switch args[i] {
             case "--corpus": corpusPath = args[i+1]; i += 2
+            case "--lora":   loraPath = args[i+1]; i += 2
             case "--batches": nBatches = Int(args[i+1]) ?? nBatches; i += 2
             case "--batch": batchSize = Int(args[i+1]); i += 2
             case "--seed": seed = UInt32(args[i+1]) ?? 0; i += 2
@@ -66,6 +68,17 @@ enum Eval {
         let model = TinyGPTModel(cfg)
         do { try TinyGPTWeightLoader.load(file, into: model) }
         catch { fputs("error loading weights: \(error)\n", stderr); exit(1) }
+
+        // Apply LoRA adapter on top if provided.
+        if let loraPath = loraPath {
+            do {
+                let adapter = try LoraAdapterReader.read(URL(fileURLWithPath: loraPath))
+                try LoraAdapterReader.apply(adapter, to: model)
+                print("• with LoRA adapter: rank=\(adapter.header.rank) alpha=\(adapter.header.alpha) targets=\(adapter.header.targetSuffixes.joined(separator: ","))")
+            } catch {
+                fputs("error loading LoRA: \(error)\n", stderr); exit(1)
+            }
+        }
 
         // Load corpus
         let corpus: ByteCorpus

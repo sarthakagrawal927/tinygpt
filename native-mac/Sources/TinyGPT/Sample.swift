@@ -14,7 +14,8 @@ enum Sample {
         var maxTokens = 200
         var temperature: Float = 0.8
         var useKVCache = true
-        var loraPath: String? = nil
+        var loraPaths: [String] = []
+        var loraWeights: [Float] = []
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -33,7 +34,12 @@ enum Sample {
                 useKVCache = true; i += 1
             case "--lora":
                 guard i + 1 < args.count else { exitUsage() }
-                loraPath = args[i + 1]; i += 2
+                loraPaths.append(args[i + 1]); i += 2
+            case "--lora-weight":
+                // Per-adapter mix weight when composing multiple LoRAs.
+                // Supply once per --lora, same order. Defaults to 1.0 each.
+                guard i + 1 < args.count else { exitUsage() }
+                loraWeights.append(Float(args[i + 1]) ?? 1.0); i += 2
             case "-h", "--help":
                 exitUsage()
             default:
@@ -75,16 +81,26 @@ enum Sample {
             fputs("error loading weights: \(error)\n", stderr)
             exit(1)
         }
-        // Apply a LoRA adapter on top if provided. The injection swaps
-        // q/k/v/o/fc_* Linears for LoraLinear instances; loading the
-        // adapter's A, B matrices overwrites the freshly-initialised ones.
-        if let loraPath = loraPath {
+        // Apply one OR MORE LoRA adapters on top.
+        //   - 0 adapters: pure base
+        //   - 1 adapter:  base + adapter (the usual single fine-tune)
+        //   - 2+ adapters: composed via StackedLoraLinear; each adapter
+        //     contributes its own delta, scaled by its --lora-weight
+        if !loraPaths.isEmpty {
             do {
-                let adapter = try LoraAdapterReader.read(URL(fileURLWithPath: loraPath))
-                try LoraAdapterReader.apply(adapter, to: model)
-                print("loaded LoRA adapter: rank=\(adapter.header.rank) alpha=\(adapter.header.alpha) targets=\(adapter.header.targetSuffixes.joined(separator: ","))")
+                let adapters = try loraPaths.map { try LoraAdapterReader.read(URL(fileURLWithPath: $0)) }
+                // Default missing weights to 1.0 each
+                while loraWeights.count < adapters.count { loraWeights.append(1.0) }
+                if adapters.count == 1 {
+                    try LoraAdapterReader.apply(adapters[0], to: model)
+                    print("loaded LoRA: rank=\(adapters[0].header.rank) targets=\(adapters[0].header.targetSuffixes.joined(separator: ","))")
+                } else {
+                    try LoraStackInjection.apply(adapters, weights: loraWeights, to: model)
+                    let blend = zip(loraPaths, loraWeights).map { "\($0.0.split(separator: "/").last ?? "") @ \($0.1)" }.joined(separator: " + ")
+                    print("composed \(adapters.count) LoRAs: \(blend)")
+                }
             } catch {
-                fputs("error loading LoRA adapter: \(error)\n", stderr)
+                fputs("error loading LoRA adapter(s): \(error)\n", stderr)
                 exit(1)
             }
         }
