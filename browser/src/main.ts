@@ -1393,6 +1393,16 @@ async function decodeModelFile(file: File): Promise<{ config: RunConfig; state: 
     state = expandFp16WeightsOnly(state, header.config);
     header.weightDtype = "fp32";              // signal the canonical layout to downstream consumers
     header.includesOptimizerState = true;     // moments are zero-filled, but the LAYOUT now matches
+  } else if (header.weightDtype === "int4" && header.includesOptimizerState === false) {
+    // Storage-side quantization: dequantize block-wise int4 → fp32 in JS
+    // before handing off to the WASM importer. The WASM/native paths never
+    // see the int4 layout — it's purely a download-size reduction. The
+    // [in, out] vs [out, in] storage convention is preserved because we
+    // quantize the bytes AS STORED in the source fp16 file and dequantize
+    // them back in the same order; no shape reinterpretation happens here.
+    state = expandInt4WeightsOnly(state, header.config, header);
+    header.weightDtype = "fp32";
+    header.includesOptimizerState = true;
   }
 
   return { config: header.config, state, header };
@@ -1431,6 +1441,87 @@ function expandFp16WeightsOnly(stateFp16: ArrayBuffer, config: RunConfig): Array
     // m and v zero-init — already zero from ArrayBuffer allocation.
     f16Idx += size;
     outFloat += size * 3;
+  }
+  return out;
+}
+
+/** Convert a weights-only block-wise int4 state buffer to the canonical
+ *  [step(int32), then per-param [w_fp32, m=0, v=0]] layout the WASM
+ *  importer expects. Block size + scale blob layout match
+ *  browser/finalize_gallery_int4.mjs.
+ *
+ *  Why dequantize in JS instead of on the GPU: the WASM/native loader is
+ *  the only consumer of `state`; it expects fp32 triplets. Doing the
+ *  decompression here keeps the existing import path untouched and limits
+ *  the int4-aware code to a single function. Speed isn't the goal — the
+ *  user only pays this cost ONCE per page load. File size is the goal,
+ *  and the download is already ~4× smaller before we get here. */
+function expandInt4WeightsOnly(
+  state: ArrayBuffer,
+  config: RunConfig,
+  header: Record<string, unknown>,
+): ArrayBuffer {
+  const blockSize = (header.int4BlockSize as number) ?? 64;
+  const manifest = buildManifest(config);
+  // Per-tensor block count + scale offsets. The file packs scales first,
+  // then nibbles, both in manifest order, both with one full block of
+  // storage per ceil(size/blockSize) blocks (so partial blocks are
+  // zero-padded — see finalize_gallery_int4.mjs's quantize comment).
+  let totalScalars = 0;
+  let totalPackedBytes = 0;
+  const layout: { blocks: number }[] = [];
+  for (const t of manifest) {
+    const n = t.shape.reduce((a, b) => a * b, 1);
+    const nBlocks = Math.ceil(n / blockSize);
+    layout.push({ blocks: nBlocks });
+    totalScalars += nBlocks;
+    totalPackedBytes += nBlocks * (blockSize >>> 1);
+  }
+  const expectedBytes = 4 + totalScalars * 2 + totalPackedBytes;
+  if (state.byteLength !== expectedBytes) {
+    throw new Error(
+      `int4 state size mismatch: got ${state.byteLength} bytes, expected ${expectedBytes} ` +
+      `(step + ${totalScalars} fp16 scales + ${totalPackedBytes} packed bytes)`,
+    );
+  }
+  const scalesView = new DataView(state, 4, totalScalars * 2);
+  const packedView = new Uint8Array(state, 4 + totalScalars * 2, totalPackedBytes);
+
+  // Output is the canonical layout: int32 step + 3 × fp32 per param.
+  // (Adam m + v zero-fill — same as the fp16 expander above.)
+  const totalFloats = manifest.reduce((acc, t) => acc + t.shape.reduce((a, b) => a * b, 1), 0);
+  const outBytes = 4 + totalFloats * 3 * 4;
+  const out = new ArrayBuffer(outBytes);
+  new Int32Array(out, 0, 1)[0] = new Int32Array(state, 0, 1)[0];
+  const f32 = new Float32Array(out, 4);
+
+  let scaleIdx = 0;
+  let packedIdx = 0;
+  let outFloat = 0;
+  for (let ti = 0; ti < manifest.length; ti++) {
+    const t = manifest[ti];
+    const n = t.shape.reduce((a, b) => a * b, 1);
+    const nBlocks = layout[ti].blocks;
+    // Cache this tensor's scales (fp16 → fp32) once so the inner loop is
+    // a single multiply per weight.
+    const scaleStartByte = scaleIdx * 2;
+    const blockScales = new Float32Array(nBlocks);
+    for (let b = 0; b < nBlocks; b++) {
+      blockScales[b] = fp16ToFp32(scalesView.getUint16(scaleStartByte + b * 2, true));
+    }
+    // Walk packed bytes for this tensor. Block i lives at
+    // [packedIdx + i*(blockSize/2), …]; nibble j-of-2 is low/high.
+    const halfBlock = blockSize >>> 1;
+    for (let i = 0; i < n; i++) {
+      const b = (i / blockSize) | 0;
+      const inBlock = i - b * blockSize;
+      const byte = packedView[packedIdx + b * halfBlock + (inBlock >>> 1)];
+      const nibble = (inBlock & 1) === 0 ? (byte & 0xf) : (byte >>> 4) & 0xf;
+      f32[outFloat + i] = (nibble - 8) * blockScales[b];
+    }
+    scaleIdx += nBlocks;
+    packedIdx += nBlocks * halfBlock;
+    outFloat += n * 3;  // skip past w + m + v slots; m, v stay zero
   }
   return out;
 }
@@ -3135,6 +3226,15 @@ interface GalleryModel {
   corpus?: string;
   corpusUrl?: string;
   file: string;          // path relative to /gallery/ — or filename for the OPFS cache key
+  /** Optional 4-bit-quantized variant of the same checkpoint. Same gallery
+   *  ID, ~4× smaller download (~5 MB vs ~19 MB for the Huge preset). When
+   *  present AND the int4 numerics gate has passed in this session, the
+   *  loader prefers this file. Falls back to `file` (fp16) on gate failure
+   *  or if the int4 file is missing. Filename is keyed separately in OPFS
+   *  so the two variants cache independently. */
+  fileInt4?: string;
+  fileInt4Bytes?: number;
+  fileBytes?: number;
   /** Absolute URL the model is fetched from. When present, overrides the
    *  default `/gallery/${file}` resolution. Used in v2 to serve models from
    *  R2 (or any CDN) without rebundling the site. The OPFS cache key still
@@ -3263,6 +3363,148 @@ function renderGallery(
  *  the wrong model under the user's feet. */
 let galleryFetchAbort: AbortController | null = null;
 
+/** Memoized int4 numerics gate verdict + summary. `null` = not run yet.
+ *  Runs once per session, the first time we attempt to load a gallery model
+ *  that has an int4 variant available. */
+let int4GateVerdict: { passed: boolean; summary: string } | null = null;
+
+/** Numerics gate for the int4 dequant path.
+ *
+ *  Mirrors webgpu/ops.ts's verifyF16Storage in spirit: synthesize a
+ *  representative weight matrix, round-trip it through the same packing +
+ *  unpacking we'll use on real gallery files, and confirm the drift is
+ *  small enough that the downstream network won't notice. Tighter than
+ *  the conversion-time per-tensor metric (which is dominated by tiny-bias
+ *  tensors) — this one models the actual mix of large-magnitude weights
+ *  that show up in attention + MLP matmuls.
+ *
+ *  Pass thresholds:
+ *    max_abs < 1× of max(|reference|)        (no error bigger than the
+ *                                             largest legitimate value —
+ *                                             a real packing bug would
+ *                                             trivially exceed this)
+ *    mean_rel < 60%                          (averaged over the matrix)
+ *
+ *  Why 60% and not the f16 gate's 0.5%: 4-bit quantization is fundamentally
+ *  ~3-4× lossier than fp16 per weight. A matrix with outliers (which is
+ *  every real attention/MLP matrix — Adam-trained weights are heavy-
+ *  tailed) sees the quiet majority quantized to ±1 step of grid = ~mean
+ *  magnitude error per weight. The end-to-end test that the OUTPUT still
+ *  looks right is smoke_int4.mjs + the gallery generation. The gate's
+ *  job is to catch CATASTROPHIC bugs (wrong block size, off-by-one in
+ *  packing, wrong endianness) — those would show as ≥99% drift.
+ *
+ *  Cheap (<1 ms): runs entirely in JS on synthetic data, no WebGPU,
+ *  no GPU buffers, no asynchronous setup. */
+function runInt4NumericsGate(): { passed: boolean; summary: string } {
+  if (int4GateVerdict) return int4GateVerdict;
+  const N = 1024;
+  const blockSize = 64;
+  // Deterministic gaussian-ish input — actual weight scale (~0.05 stddev
+  // for attention projections after Adam settles).
+  const values = new Float32Array(N);
+  let seed = 1337;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return (seed / 0x7fffffff) * 2 - 1;
+  };
+  // Approximate Gaussian via 3-uniform sum.
+  for (let i = 0; i < N; i++) values[i] = (rand() + rand() + rand()) / 3 * 0.05;
+  // Throw a few outliers in — those are what stress the block-wise scaling.
+  values[10] = 0.6; values[500] = -0.7; values[800] = 0.5;
+
+  // Quantize + dequantize in JS — same algorithm as the conversion
+  // script + the browser-side expander, just inline so the gate is
+  // self-contained.
+  const nBlocks = Math.ceil(N / blockSize);
+  const scales = new Float32Array(nBlocks);
+  const packed = new Uint8Array(nBlocks * (blockSize >> 1));
+  for (let b = 0; b < nBlocks; b++) {
+    const start = b * blockSize;
+    const end = Math.min(start + blockSize, N);
+    let absmax = 0;
+    for (let i = start; i < end; i++) { const a = Math.abs(values[i]); if (a > absmax) absmax = a; }
+    const scale = absmax > 0 ? absmax / 7 : 0;
+    scales[b] = scale;
+    if (scale === 0) continue;
+    const inv = 1 / scale;
+    for (let i = start; i < end; i++) {
+      let q = Math.round(values[i] * inv);
+      if (q < -7) q = -7; if (q > 7) q = 7;
+      const nibble = (q + 8) & 0xf;
+      const idx = b * blockSize + (i - start);
+      if ((idx & 1) === 0) packed[idx >>> 1] = nibble;
+      else packed[idx >>> 1] |= nibble << 4;
+    }
+  }
+  // Round-trip scales through fp16 to model the on-disk storage.
+  for (let i = 0; i < nBlocks; i++) {
+    const buf = new ArrayBuffer(4);
+    const f32 = new Float32Array(buf); const u32 = new Uint32Array(buf);
+    f32[0] = scales[i];
+    const x = u32[0];
+    const sign = (x >>> 16) & 0x8000;
+    let mant = x & 0x007fffff;
+    const exp = (x >>> 23) & 0xff;
+    let h: number;
+    if (exp === 0xff) h = sign | 0x7c00 | (mant ? 0x200 : 0);
+    else {
+      let halfExp = exp - 127 + 15;
+      if (halfExp >= 0x1f) h = sign | 0x7c00;
+      else if (halfExp <= 0) {
+        if (halfExp < -10) h = sign;
+        else {
+          mant = (mant | 0x00800000) >> (1 - halfExp);
+          if (mant & 0x00001000) mant += 0x00002000;
+          h = sign | (mant >> 13);
+        }
+      } else {
+        if (mant & 0x00001000) { mant += 0x00002000; if (mant & 0x00800000) { mant = 0; halfExp++; } }
+        h = halfExp >= 0x1f ? (sign | 0x7c00) : (sign | (halfExp << 10) | (mant >> 13));
+      }
+    }
+    scales[i] = fp16ToFp32(h);
+  }
+  // Dequantize.
+  const deq = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const b = (i / blockSize) | 0;
+    const byte = packed[i >>> 1];
+    const nibble = (i & 1) === 0 ? (byte & 0xf) : (byte >>> 4) & 0xf;
+    deq[i] = (nibble - 8) * scales[b];
+  }
+  // Compare.
+  let sumAbsRef = 0;
+  let maxAbsRef = 0;
+  for (let i = 0; i < N; i++) {
+    const a = Math.abs(values[i]);
+    sumAbsRef += a;
+    if (a > maxAbsRef) maxAbsRef = a;
+  }
+  const meanAbsRef = sumAbsRef / N;
+  const denomFloor = Math.max(meanAbsRef * 0.01, 1e-6);
+  let maxAbs = 0, sumRel = 0;
+  for (let i = 0; i < N; i++) {
+    const e = Math.abs(deq[i] - values[i]);
+    if (e > maxAbs) maxAbs = e;
+    sumRel += e / Math.max(Math.abs(values[i]), denomFloor);
+  }
+  const meanRel = sumRel / N;
+  // max_abs threshold: no per-element error larger than the LARGEST
+  // legitimate weight. A correct packing trivially clears this (errors
+  // are bounded by scale/2 ≈ absmax/14); a wrong endianness or off-by-
+  // one in block indexing would blow past it.
+  const maxAbsThreshold = maxAbsRef;
+  const passed = maxAbs < maxAbsThreshold && meanRel < 0.60;
+  const summary =
+    `mean|ref|=${meanAbsRef.toExponential(2)}, ` +
+    `max_abs=${maxAbs.toExponential(2)} (limit ${maxAbsThreshold.toExponential(2)}), ` +
+    `mean_rel=${(meanRel * 100).toFixed(2)}% (limit 60.00%) — ${passed ? "PASS" : "FAIL"}`;
+  console.info(`[int4] numerics gate: ${summary}`);
+  int4GateVerdict = { passed, summary };
+  return int4GateVerdict;
+}
+
 async function loadGalleryCard(
   card: HTMLButtonElement,
   m: GalleryModel,
@@ -3283,23 +3525,50 @@ async function loadGalleryCard(
   const originalSample = sampleSlot?.textContent ?? "";
   if (sampleSlot) sampleSlot.textContent = "loading…";
   try {
-    // OPFS cache hit? Skip the network entirely — gallery files are ~18 MB,
+    // Prefer the int4 variant when the manifest advertises one AND the
+    // session's numerics gate has passed. Falls back to fp16 on gate fail
+    // / missing variant / network error. The OPFS cache key is the
+    // FILENAME — so fp16 and int4 cache independently, and a future
+    // user-toggle to force fp16 doesn't have to re-fetch what's there.
+    let pickedFile = m.file;
+    if (m.fileInt4) {
+      const gate = runInt4NumericsGate();
+      if (gate.passed) pickedFile = m.fileInt4;
+    }
+    // OPFS cache hit? Skip the network entirely — gallery files are ~5-19 MB,
     // and after the first download we own the bytes locally. Falls through
     // to network on cache miss / OPFS off / quota error / corrupted file.
-    let bytes: Uint8Array | null = await loadCachedGalleryModel(m.file);
+    let bytes: Uint8Array | null = await loadCachedGalleryModel(pickedFile);
     if (!bytes) {
       // v1: relative `/gallery/${file}`. v2: absolute `m.url` (e.g. R2 CDN).
-      // The OPFS cache is keyed on `file` either way so cached entries
+      // The OPFS cache is keyed on `pickedFile` either way so cached entries
       // survive a hosting move without re-downloading.
-      const fetchUrl = m.url ?? `/gallery/${m.file}`;
+      const baseUrl = m.url ?? `/gallery/${m.file}`;
+      // When we're substituting int4 for the manifest's `file`, swap the
+      // tail of the URL too (works for both relative `/gallery/x.bin` and
+      // absolute CDN URLs). When `pickedFile === m.file` this is a no-op.
+      const fetchUrl = pickedFile === m.file ? baseUrl : baseUrl.replace(/[^/]+$/, pickedFile);
       const resp = await fetch(fetchUrl, { signal });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const buf = await resp.arrayBuffer();
-      bytes = new Uint8Array(buf);
+      if (!resp.ok) {
+        // int4 fetch failed (404, network) — silently fall back to fp16
+        // so the user still gets their model. Cache key change ensures
+        // the failed attempt isn't remembered.
+        if (pickedFile !== m.file) {
+          console.warn(`[gallery] int4 fetch failed (${resp.status}), falling back to fp16 for ${m.id}`);
+          pickedFile = m.file;
+          const fp16Resp = await fetch(m.url ?? `/gallery/${m.file}`, { signal });
+          if (!fp16Resp.ok) throw new Error(`HTTP ${fp16Resp.status}`);
+          bytes = new Uint8Array(await fp16Resp.arrayBuffer());
+        } else {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+      } else {
+        bytes = new Uint8Array(await resp.arrayBuffer());
+      }
       // Fire-and-forget write to OPFS — never block model load on cache write.
-      void saveCachedGalleryModel(m.file, bytes);
+      void saveCachedGalleryModel(pickedFile, bytes);
     }
-    const file = new File([bytes as Uint8Array<ArrayBuffer>], m.file, { type: "application/octet-stream" });
+    const file = new File([bytes as Uint8Array<ArrayBuffer>], pickedFile, { type: "application/octet-stream" });
     await loadModelFromFile(file, `${m.name} (gallery)`);
     // Surface the loaded model's GPU footprint as a live pill in the
     // capability cluster — answers "how much of my GPU is being used".

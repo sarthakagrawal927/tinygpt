@@ -17,7 +17,9 @@
       "sample": "MENENIUS:\nThen you shall hear from a kinsman, ay, my lord.\n\nFIRST CITIZEN:\nWhat trade art thou? Speak, …",
       "fileBytes": 19253009,
       "gpuBytes": 115304448,
-      "prompt": "MENENIUS:\n"
+      "prompt": "MENENIUS:\n",
+      "fileInt4": "shakespeare.int4.bin",
+      "fileInt4Bytes": 5140277
     },
     {
       "id": "tinystories",
@@ -34,7 +36,9 @@
       "sample": "Once upon a time, there was a penny girl named Lily. She loved to play with her toys and always dress. One day, she saw a big bird whole wanted to see what was the table. She sat down on the monket and the nespecial stopped on the way and blocked on",
       "fileBytes": 19252815,
       "gpuBytes": 115304448,
-      "prompt": "Once upon a time"
+      "prompt": "Once upon a time",
+      "fileInt4": "tinystories.int4.bin",
+      "fileInt4Bytes": 5140106
     },
     {
       "id": "code",
@@ -51,7 +55,9 @@
       "sample": "def _feed_ids:\n        if feed_id:\n            redializer_feeds(feed_ids)\n                feed_ids = RUserSubscribedusSing(feed_ids, feed_ids, …",
       "fileBytes": 19252805,
       "gpuBytes": 115304448,
-      "prompt": "def "
+      "prompt": "def ",
+      "fileInt4": "code.int4.bin",
+      "fileInt4Bytes": 5140096
     },
     {
       "id": "chat",
@@ -68,7 +74,9 @@
       "sample": "User: Which is the first in 1845 in ways in 1161 in the language of Third. It is one of reason to the Real Bannaro of China? Charlene is also be observiation to the Reduce Bird Bock (201), for food and the microscohology can be professe",
       "fileBytes": 19248969,
       "gpuBytes": 115304448,
-      "prompt": "User: "
+      "prompt": "User: ",
+      "fileInt4": "chat.int4.bin",
+      "fileInt4Bytes": 5136260
     }
   ]
 }

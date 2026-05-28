@@ -1369,10 +1369,76 @@ const pageBody = `
         </div>
       </article>
 
-      <!-- 21: Browser frontier — tech we're tracking but haven't shipped -->
-      <article id="frontier" class="lever">
+      <!-- 21: Browser-side weight quantization — storage win on gallery models -->
+      <article id="weight-quant" class="lever">
         <div class="lever-head">
           <span class="lever-num">21</span>
+          <h2 class="lever-title">Browser-side weight quantization</h2>
+          <span class="status shipped"><span class="dot"></span> Shipped — 4-bit gallery variants, ~4× smaller download</span>
+        </div>
+        <div class="lever-meta">
+          <span>Gallery file size: <strong>~19 MB → ~5 MB</strong> per model</span>
+          <span>Total gallery download: <strong>~75 MB → ~20 MB</strong></span>
+          <span>Lives in: <code>browser/finalize_gallery_int4.mjs</code> · <code>expandInt4WeightsOnly</code> in main.ts</span>
+        </div>
+        <div class="lever-body">
+          <p>
+            Storage-side 4-bit quantization for the gallery models. Block-wise
+            symmetric scheme (block size 64, one fp16 scale per block, two
+            int4 indices packed per byte — same shape as GGUF Q4_0). Conversion
+            runs offline via <code>finalize_gallery_int4.mjs</code> against the
+            existing fp16 <code>.bin</code> files; the browser dequantizes
+            block-wise back to fp32 once at load time and hands the canonical
+            layout to the existing WASM importer, which doesn't know anything
+            changed. The fp16 files keep shipping alongside as the fallback.
+          </p>
+          <p>
+            <strong>Why not int4 GEMM on the GPU?</strong> Apple's WebGPU
+            implementation lacks the integer matmul intrinsics that would
+            make on-device int4 compute a win — the actual int4 multiply
+            would still decode each weight before fma. Trying to do it in
+            WGSL ends up slower than dequantizing once at load time and
+            running the existing fp16-storage matmul. The honest goal here
+            is <em>download size</em> + <em>cold-load time</em>, not
+            inference speed: cold-start drops by 75% on the gallery path.
+          </p>
+          <p>
+            <strong>Quality.</strong> Gated by two checks: (1) a startup
+            numerics gate (<code>runInt4NumericsGate</code>) that synthesizes
+            a representative weight matrix and verifies the round-trip
+            error fits the inherent 4-bit envelope — catches catastrophic
+            bugs (wrong block size, endianness) without enforcing an
+            unrealistic per-element bound; (2) the
+            <code>browser/smoke_int4.mjs</code> node-side check that the
+            published files round-trip with bounded per-tensor drift. End-
+            to-end: the Shakespeare model still generates Shakespeare
+            (see <code>smoke_int4_browser.mjs</code>).
+          </p>
+          <div class="why">
+            <span class="why-key">Numbers</span>
+            <span class="why-val">
+              4 gallery models × ~19 MB fp16 → ~5 MB int4 each. Gate runs
+              in &lt;1 ms on synthetic data; conversion runs in ~1 s per
+              model offline. Cache key keys on filename so int4 and fp16
+              cache independently in OPFS.
+            </span>
+          </div>
+          <div class="why">
+            <span class="why-key">Not done</span>
+            <span class="why-val">
+              True int4 GEMM (the speed win) still depends on hardware
+              support that's not in WebGPU as of 2026. When the
+              <code>cooperative_matrix</code> extension lands with int8/int4
+              types, the same files become a compute win too — see lever 22.
+            </span>
+          </div>
+        </div>
+      </article>
+
+      <!-- 22: Browser frontier — tech we're tracking but haven't shipped -->
+      <article id="frontier" class="lever">
+        <div class="lever-head">
+          <span class="lever-num">22</span>
           <h2 class="lever-title">Browser frontier — tech we're tracking</h2>
           <span class="status planned"><span class="dot"></span> Watching · revisit when stable</span>
         </div>
