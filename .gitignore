@@ -67,3 +67,8 @@ browser/.astro/
 # browser/scripts/copy_docs.mjs at every `npm run dev` / `npm run build`,
 # the canonical source lives in /docs.
 browser/src/content/docs/
+
+# native-mac build artifacts
+native-mac/.xcode-build/
+native-mac/.build/
+native-mac/Package.resolved

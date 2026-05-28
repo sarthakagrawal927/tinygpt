@@ -3134,7 +3134,19 @@ interface GalleryModel {
   blurb?: string;
   corpus?: string;
   corpusUrl?: string;
-  file: string;          // path relative to /gallery/
+  file: string;          // path relative to /gallery/ — or filename for the OPFS cache key
+  /** Absolute URL the model is fetched from. When present, overrides the
+   *  default `/gallery/${file}` resolution. Used in v2 to serve models from
+   *  R2 (or any CDN) without rebundling the site. The OPFS cache key still
+   *  uses `file` so cached entries survive a hosting move. */
+  url?: string;
+  /** Opaque version tag the cache uses to invalidate stale OPFS entries
+   *  when a model file is republished at the same path. Cache hits require
+   *  the stored cdnVersion to match this. Absent → never invalidate. */
+  cdnVersion?: string;
+  /** SPDX-style identifier for the corpus license (e.g. "CC0-1.0", "MIT").
+   *  Surfaced in the gallery card; required for community submissions. */
+  license?: string;
   params?: string;
   paramCount?: number;
   trainLoss?: string;
@@ -3276,7 +3288,11 @@ async function loadGalleryCard(
     // to network on cache miss / OPFS off / quota error / corrupted file.
     let bytes: Uint8Array | null = await loadCachedGalleryModel(m.file);
     if (!bytes) {
-      const resp = await fetch(`/gallery/${m.file}`, { signal });
+      // v1: relative `/gallery/${file}`. v2: absolute `m.url` (e.g. R2 CDN).
+      // The OPFS cache is keyed on `file` either way so cached entries
+      // survive a hosting move without re-downloading.
+      const fetchUrl = m.url ?? `/gallery/${m.file}`;
+      const resp = await fetch(fetchUrl, { signal });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const buf = await resp.arrayBuffer();
       bytes = new Uint8Array(buf);
