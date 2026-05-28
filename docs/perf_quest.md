@@ -159,6 +159,15 @@ in this doc + the gate-framework pattern in `docs/precision.md`.
    MLGraphBuilder; route inference to CoreML / ANE; training stays
    WebGPU. ~5-7 hr. Sampling-only path, falls back to WebGPU on context
    creation failure.
+10. **Live activity feed** (v1.1 wishlist item). Show recent events
+    from other visitors in real time — "someone in [country] just
+    started training Huge", "[N] tabs currently sampling from
+    Shakespeare", Vercel-fluid-style parallel-arrow visualization of
+    in-flight workloads. Needs: realtime backend (PartyKit on CF
+    Durable Objects is the natural choice given we're already on CF
+    Pages), frontend feed widget, privacy disclosure copy, anti-abuse
+    rate-limit. ~1-2 days. Best framed as a v2 launch — two distinct
+    HN moments better than one delayed.
 2. **#91 — `shader-f16` full-compute matmul.** New WGSL with `enable f16;`
    and `f16` accumulators. Gated on `capabilities.shaderF16`. Same
    numerics gate.
