@@ -14,7 +14,7 @@
  */
 
 import { GpuModel } from "../../webgpu/gpu_model";
-import { createGpuContext } from "../../webgpu/tensor";
+import { createGpuContext, type GpuContext } from "../../webgpu/tensor";
 import { TinyGptBackend, TinyGptModel } from "./backend";
 import { decode, encode } from "./tokenizer";
 import type { FromWorker, RunConfig, ToWorker } from "./types";
@@ -27,6 +27,16 @@ const ctx = self as unknown as {
 let backend: TinyGptBackend | null = null;
 let model: TinyGptModel | null = null; // WASM model
 let gpuModel: GpuModel | null = null; // WebGPU model
+// Single shared WebGPU device for the worker. Each createGpuContext() call
+// returns a fresh GPUDevice + adapter context + pipeline cache; without
+// caching, every gallery reload allocated a new device while the previous
+// one stayed alive in the GPU process. Now: lazily create once, reuse for
+// every subsequent GpuModel construction.
+let gpuCtx: GpuContext | null = null;
+async function getGpuCtx(): Promise<GpuContext | null> {
+  if (!gpuCtx) gpuCtx = await createGpuContext();
+  return gpuCtx;
+}
 let paused = false;
 let stopped = false;
 let training = false;
@@ -62,13 +72,23 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
  *  UI (hide GPU-mem pill, disable Generate, show "freed after idle" hint). */
 function offloadModel(): void {
   if (training) return; // can't free under an active run
+  disposeGpuModel();
+  // Don't free the WASM-backed `model` — it's smaller, the page might still
+  // want to use it, and the destroy path is different. Future work.
+  post({ type: "model_offloaded" });
+}
+
+/** Drop the current GpuModel AND free its GPU buffers. Use everywhere we
+ *  used to set `gpuModel = null` — bare null-assignment leaks because JS
+ *  GC doesn't know about WebGPU buffer lifetimes; we need an explicit
+ *  destroy() chain to release them back to the GPU. Leak audit found four
+ *  call sites where the previous model would orphan ~110 MB each
+ *  (gallery reload, training restart, WebGPU→WASM switch, restore fallback). */
+function disposeGpuModel(): void {
   if (gpuModel) {
     gpuModel.destroy();
     gpuModel = null;
   }
-  // Don't free the WASM-backed `model` — it's smaller, the page might still
-  // want to use it, and the destroy path is different. Future work.
-  post({ type: "model_offloaded" });
 }
 
 async function runTraining(text: string, cfg: RunConfig): Promise<void> {
@@ -94,7 +114,7 @@ async function runTraining(text: string, cfg: RunConfig): Promise<void> {
 
 // --- WASM backend ---------------------------------------------------------
 async function runWasm(text: string, cfg: RunConfig): Promise<void> {
-  if (gpuModel) gpuModel = null;
+  disposeGpuModel(); // user switched WebGPU → WASM; release the GPU buffers
   if (!backend) {
     post({ type: "status", message: "loading WASM backend…" });
     backend = await TinyGptBackend.load();
@@ -164,20 +184,24 @@ async function runWasm(text: string, cfg: RunConfig): Promise<void> {
 
 // --- WebGPU backend -------------------------------------------------------
 async function runWebGpu(text: string, cfg: RunConfig): Promise<void> {
-  const gpuCtx = await createGpuContext();
-  if (!gpuCtx) {
+  const gpuCtxLocal = await getGpuCtx();
+  if (!gpuCtxLocal) {
     post({ type: "status", message: "WebGPU unavailable — using WASM instead" });
     await runWasm(text, cfg);
     return;
   }
   if (model) { model.free(); model = null; }
+  // If we held a previous GpuModel (e.g., user loaded a gallery model then
+  // hit "Start training"), free its ~110 MB of GPU buffers BEFORE building
+  // the new one — otherwise both live in GPU memory until GC notices.
+  disposeGpuModel();
 
   const tokens = encode(text);
   if (tokens.length < cfg.ctx + 2) {
     post({ type: "error", message: `corpus is ${tokens.length} bytes — need > ${cfg.ctx + 2}` });
     return;
   }
-  gpuModel = new GpuModel(gpuCtx, {
+  gpuModel = new GpuModel(gpuCtxLocal, {
     vocab: 256, ctx: cfg.ctx, layers: cfg.layers, heads: cfg.heads,
     dModel: cfg.dModel, dMlp: cfg.dMlp, seed: cfg.seed,
   });
@@ -525,11 +549,13 @@ async function doRestore(state: ArrayBuffer, cfg: RunConfig): Promise<void> {
     // Try WebGPU first if the saved file was a WebGPU run.
     if (cfg.backend === "webgpu") {
       try {
-        const gpuCtx = await createGpuContext();
-        if (!gpuCtx) throw new Error("WebGPU adapter not available");
+        const gpuCtxLocal = await getGpuCtx();
+        if (!gpuCtxLocal) throw new Error("WebGPU adapter not available");
         if (model) { model.free(); model = null; }
-        if (gpuModel) gpuModel = null;
-        gpuModel = new GpuModel(gpuCtx, {
+        // Free the previous gallery model's GPU buffers before loading the new
+        // one — otherwise back-to-back gallery loads accumulate ~110 MB each.
+        disposeGpuModel();
+        gpuModel = new GpuModel(gpuCtxLocal, {
           vocab: 256, ctx: cfg.ctx, layers: cfg.layers, heads: cfg.heads,
           dModel: cfg.dModel, dMlp: cfg.dMlp, seed: cfg.seed,
         });
@@ -552,7 +578,8 @@ async function doRestore(state: ArrayBuffer, cfg: RunConfig): Promise<void> {
     // WASM fallback path.
     if (!backend) backend = await TinyGptBackend.load();
     if (model) { model.free(); model = null; }
-    gpuModel = null;
+    // WebGPU restore failed; free any partial GPU state before falling back.
+    disposeGpuModel();
     model = backend.createModel({
       ctx: cfg.ctx, layers: cfg.layers, heads: cfg.heads,
       dModel: cfg.dModel, dMlp: cfg.dMlp, seed: cfg.seed,
