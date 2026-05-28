@@ -138,7 +138,24 @@ public enum HFModelLoader {
         let hfConfig = try HuggingFaceConfig.read(configURL)
 
         // Construct the model from the config.
-        let cfg = HFConfigConverter.toModelConfig(hfConfig)
+        var cfg = HFConfigConverter.toModelConfig(hfConfig)
+        // Peek at the safetensors shards: if NO lm_head.weight exists,
+        // the model uses tied embeddings regardless of the config field
+        // (Llama family's default is `tie_word_embeddings: true` when the
+        // field is absent, and smaller models often omit a separate
+        // lm_head to save params). Setting tieEmbeddings=true makes the
+        // model use tokenEmbedding.asLinear(x) for the output projection
+        // instead of a random fresh Linear that never gets overwritten.
+        let allFilesPeek = (try? FileManager.default.contentsOfDirectory(at: dir,
+                              includingPropertiesForKeys: nil)) ?? []
+        var hasLmHead = false
+        for shardURL in allFilesPeek where shardURL.pathExtension == "safetensors" {
+            if let f = try? SafetensorsReader.read(shardURL),
+               f.tensors["lm_head.weight"] != nil {
+                hasLmHead = true; break
+            }
+        }
+        if !hasLmHead { cfg.tieEmbeddings = true }
         let model = TinyGPTModelHF(cfg)
 
         // Find all safetensors files in the dir.
@@ -162,20 +179,27 @@ public enum HFModelLoader {
             }
         }
 
-        // For each HF tensor, map to our naming and stash the MLXArray.
-        // We collect into a NestedDictionary<String, MLXArray> for
-        // Module.update.
+        // Build the flat update dict using OUR HFModel's parameter names.
+        // TinyGPTModelHF's @ModuleInfo keys are HF-native ("embed_tokens",
+        // "layers", "norm", "self_attn", "input_layernorm" …) so the only
+        // transform needed is stripping the "model." prefix that HF
+        // safetensors prepends. lm_head.weight has no prefix.
         var updates: [String: MLXArray] = [:]
         for (hfName, src) in sources {
-            guard let ourName = HFWeightMapping.map(hfName) else {
-                // The tensor exists in the HF model but doesn't map to
-                // anything we own (e.g., a rotary inv_freq buffer the
-                // attention recomputes inline). Skip silently.
+            let key: String
+            if hfName.hasPrefix("model.") {
+                key = String(hfName.dropFirst("model.".count))
+            } else if hfName == "lm_head.weight" {
+                key = "lm_head.weight"
+            } else {
+                // Unknown top-level — likely a rotary inv_freq buffer or
+                // similar; HF models often emit those as separate tensors
+                // even though we compute them inline. Skip silently.
                 continue
             }
             let bytes = src.file.tensorData(hfName)!
             let array = makeMLXArray(bytes: bytes, dtype: src.info.dtype, shape: src.info.shape)
-            updates[ourName] = array
+            updates[key] = array
         }
 
         // Apply the parameter updates to the model.
@@ -242,22 +266,19 @@ public enum HFModelLoader {
         return result
     }
 
+    /// Walk an existing ModuleParameters tree and replace each leaf
+    /// MLXArray with the value from `flat` keyed by its dotted path.
+    /// Since TinyGPTModelHF's @ModuleInfo keys ARE the HF param names
+    /// (minus the "model." prefix already stripped above), the dotted
+    /// path joins back to exactly the right key.
     private static func rewriteItem(_ item: NestedItem<String, MLXArray>,
                                      path: [String],
                                      flat: [String: MLXArray]) -> NestedItem<String, MLXArray> {
         switch item {
         case .none: return .none
         case .value:
-            // The HF mapping uses dotted names like
-            // "blocks.0.attn.q_proj.weight" but our HF-model's @ModuleInfo
-            // keys are HF-style "layers.0.self_attn.q_proj.weight". The
-            // HFWeightMapping returned our internal naming convention,
-            // which is the from-scratch model's convention. For the HF
-            // model we need the OPPOSITE direction — convert internal
-            // back to HF keys.
-            let internalName = path.joined(separator: ".")
-            let hfKey = mapInternalToHFParam(internalName)
-            if let v = flat[hfKey ?? internalName] {
+            let key = path.joined(separator: ".")
+            if let v = flat[key] {
                 return .value(v)
             }
             return item
@@ -272,21 +293,5 @@ public enum HFModelLoader {
             }
             return .dictionary(newDict)
         }
-    }
-
-    /// Convert OUR internal param name back to the HF safetensors name.
-    /// This is the reverse of HFWeightMapping.map.
-    private static func mapInternalToHFParam(_ name: String) -> String? {
-        // For HFModel the @ModuleInfo keys ARE the HF param names already
-        // (we used `key: "self_attn"`, `key: "embed_tokens"`, etc.). So
-        // for this model the internal name == HF name minus the "model."
-        // prefix. Wrap with that prefix here.
-        if name.hasPrefix("lm_head") { return name }
-        if name == "embed_tokens.weight" { return "model.embed_tokens.weight" }
-        if name == "norm.weight" { return "model.norm.weight" }
-        if name.hasPrefix("layers.") {
-            return "model.\(name)"
-        }
-        return nil
     }
 }

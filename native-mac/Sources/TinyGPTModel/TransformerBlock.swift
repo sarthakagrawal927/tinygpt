@@ -134,7 +134,11 @@ public final class SwiGLU: Module {
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        return fcDown(silu(fcUp(x)) * fcGate(x))
+        // Llama-style SwiGLU: silu is applied to GATE, then element-wise
+        // multiplied by UP. NOT silu(up) * gate — that's a different (and
+        // worse) gating function which compiles fine but produces garbage.
+        // Reference: HF transformers' modeling_llama.py LlamaMLP.forward.
+        return fcDown(silu(fcGate(x)) * fcUp(x))
     }
 }
 
