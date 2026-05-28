@@ -181,6 +181,23 @@ def load_tinygpt(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
         f.read(4)  # step
         body = f.read()
 
+    # The WASM C++ stores Linear weights as [in, out] (so y = x @ W directly).
+    # The browser dumps raw memory; the manifest claims PyTorch's [out, in]
+    # but the BYTES are in WASM's [in, out] order. To recover the PyTorch
+    # view we must read with WASM shape (the manifest's reversed dims) then
+    # transpose. This mirrors what TinyGPTWeightLoader.swift does on the
+    # Swift side. For 1D weights and Embedding, no transpose needed.
+    def _shape_for_read(entry):
+        shape = entry["shape"]
+        if _is_linear_weight(entry["name"]) and len(shape) == 2:
+            return shape[::-1]  # [in, out] — WASM's actual byte order
+        return shape
+
+    def _maybe_transpose(name, arr):
+        if _is_linear_weight(name) and arr.ndim == 2:
+            return arr.T.copy()
+        return arr
+
     state = {}
     if weight_dtype == "fp16" or not includes_optim:
         # Contiguous fp16 body, indexed by floatOffset.
@@ -188,21 +205,16 @@ def load_tinygpt(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
         for entry in manifest:
             n = int(np.prod(entry["shape"]))
             off = entry.get("floatOffset", 0)
-            arr = flat[off : off + n].reshape(entry["shape"]).copy()
-            # WASM [in, out] → PyTorch [out, in] for Linear weights.
-            if _is_linear_weight(entry["name"]) and arr.ndim == 2:
-                arr = arr.T.copy()
-            state[entry["name"]] = arr
+            arr = flat[off : off + n].reshape(_shape_for_read(entry)).copy()
+            state[entry["name"]] = _maybe_transpose(entry["name"], arr)
     else:
         # fp32 [w, m, v] triplets per tensor.
         flat = np.frombuffer(body, dtype=np.float32)
         offset = 0
         for entry in manifest:
             n = int(np.prod(entry["shape"]))
-            arr = flat[offset : offset + n].reshape(entry["shape"]).copy()
-            if _is_linear_weight(entry["name"]) and arr.ndim == 2:
-                arr = arr.T.copy()
-            state[entry["name"]] = arr
+            arr = flat[offset : offset + n].reshape(_shape_for_read(entry)).copy()
+            state[entry["name"]] = _maybe_transpose(entry["name"], arr)
             offset += 3 * n  # skip past m, v
     return config, state
 
@@ -244,12 +256,16 @@ def convert_to_coreml(model: TinyGPT, ctx: int, out_path: Path) -> None:
         traced = torch.jit.trace(model, example)
 
     # Convert. computeUnits=ALL lets Core ML route per-op to ANE/GPU/CPU.
+    # compute_precision=FLOAT32 preserves numerics (an aggressive fp16 cast
+    # destroyed sample quality in our first attempt). Core ML can still
+    # internally quantise ANE-eligible ops if it wants; we just declare
+    # the upper bound.
     mlmodel = ct.convert(
         traced,
         inputs=[ct.TensorType(name="tokens", shape=(1, ctx), dtype=np.int32)],
-        outputs=[ct.TensorType(name="logits", dtype=np.float16)],
+        outputs=[ct.TensorType(name="logits", dtype=np.float32)],
         compute_units=ct.ComputeUnit.ALL,
-        compute_precision=ct.precision.FLOAT16,
+        compute_precision=ct.precision.FLOAT32,
         minimum_deployment_target=ct.target.macOS14,
         convert_to="mlprogram",
     )
