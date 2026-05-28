@@ -276,19 +276,13 @@ function renderRunVerdict(finished: boolean): void {
     why = `Train loss is ${trainLoss.toFixed(2)} but val is ${valLoss!.toFixed(2)} — you're memorising the training text, not learning patterns. Smaller model or bigger corpus.`;
     actions.push({
       label: "Switch to a smaller preset",
-      apply: () => {
-        els.sizePreset.value = "small";
-        els.sizePreset.dispatchEvent(new Event("change"));
-      },
+      apply: () => applyVerdictPreset("small"),
     });
   } else if (trainLoss > 2.0 && params < 1_000_000) {
     why = `${formatParams(params)} params is narrow for the data you have. A bigger model would chew through more of it.`;
     actions.push({
       label: "Try Medium preset",
-      apply: () => {
-        els.sizePreset.value = "medium";
-        els.sizePreset.dispatchEvent(new Event("change"));
-      },
+      apply: () => applyVerdictPreset("medium"),
     });
   } else if (trainLoss < 1.5) {
     why = `Train loss ${trainLoss.toFixed(2)} is the sweet spot for this size. Generate now — output should look word-shaped.`;
@@ -310,9 +304,34 @@ function renderRunVerdict(finished: boolean): void {
     });
   }
 
+  // Always offer "Continue training" so users have a visible way to add
+  // more steps without hunting through the Export menu. Skip when the
+  // primary action already does the same thing (avoids duplicate CTAs).
+  const alreadyContinues = actions.some((a) => a.label.startsWith("Continue"));
+  if (!alreadyContinues) {
+    actions.push({
+      label: "Train 500 more steps",
+      apply: () => {
+        els.continueSteps.value = "500";
+        els.continueBtn.click();
+      },
+    });
+  }
+
   const actionHtml = actions
     .map((_, i) => `<button class="verdict-cta" data-action-idx="${i}">${actions[i].label}</button>`)
     .join("");
+  // Verdict actions that change the preset live on Setup. The verdict
+  // renders on Watch — without this, clicking "Try Medium preset" silently
+  // updates the form fields the user can't currently see and looks broken.
+  function applyVerdictPreset(id: string): void {
+    els.sizePreset.value = id;
+    els.sizePreset.dispatchEvent(new Event("change"));
+    const hp = document.getElementById("hyperparamDetails") as HTMLDetailsElement | null;
+    if (hp) hp.open = true;
+    const setupTab = document.querySelector<HTMLButtonElement>('.screen-tab[data-screen="setup"]');
+    setupTab?.click();
+  }
 
   verdict.innerHTML =
     `<strong>${headline}</strong> ${why}` +
@@ -839,6 +858,11 @@ els.continueBtn.addEventListener("click", () => {
   { const liveCard = document.getElementById("liveSampleCard"); if (liveCard) liveCard.hidden = true; }
   setStatus(`continuing for ${extra} more steps…`);
   // Don't reset history/chart — the new progress points extend the same curve.
+  // Extend the chart's x-axis to the new target step so points past the old
+  // maxSteps don't render outside the plot area (previously the line ran off
+  // the right edge with the axis still labelled "step <old max>").
+  const priorStep = history.length > 0 ? history[history.length - 1].step : 0;
+  chart.setMaxStep(priorStep + extra);
   runStartTime = performance.now();
   startElapsedClock();
   send({ type: "continue", extraSteps: extra });

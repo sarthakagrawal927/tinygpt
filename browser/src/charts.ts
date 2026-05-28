@@ -47,6 +47,7 @@ export class LossChart {
    *  which makes the first ~10% of training look squished into the left
    *  edge and unreadable. */
   private maxStepHint = 0;
+  private rafPending = false;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -55,6 +56,12 @@ export class LossChart {
     this.setupHiDpi();
     this.attachHoverInspect();
     this.draw();
+    // Pause the pulse-redraw when the tab is hidden — the user can't see it,
+    // and 4Hz redraws keep the renderer thread alive in background tabs.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) this.stopPulseLoop();
+      else if (this.points.length > 0) this.startPulseLoop();
+    });
   }
 
   private attachHoverInspect(): void {
@@ -142,7 +149,17 @@ export class LossChart {
   addPoint(p: Point): void {
     this.points.push(p);
     this.startPulseLoop();
-    this.draw();
+    // The pulse loop redraws at 4Hz; an extra synchronous draw per point is
+    // redundant under training (30+ points/sec) and catastrophic during model
+    // restoration (1500-point loops would each force a full canvas redraw).
+    // Coalesce via rAF so multiple addPoints within one frame collapse to one
+    // draw, and the rAF naturally pauses while the tab is hidden.
+    if (this.rafPending) return;
+    this.rafPending = true;
+    requestAnimationFrame(() => {
+      this.rafPending = false;
+      this.draw();
+    });
   }
 
   /** Throttled redraw loop — at 60fps the constant draw was visibly
