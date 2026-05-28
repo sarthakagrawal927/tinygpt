@@ -4,6 +4,7 @@ enum AppTab: Hashable { case sample, train }
 
 struct ContentView: View {
     @StateObject private var controller = ModelController()
+    @StateObject private var stats = MachineStats()
     @State private var galleryItems: [GalleryItem] = []
     @State private var selectedItem: GalleryItem? = nil
     @State private var prompt: String = "ROMEO:"
@@ -12,28 +13,63 @@ struct ContentView: View {
     @State private var tab: AppTab = .sample
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-                .frame(width: 220)
-                .background(Theme.panel)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: 220)
+                    .background(Theme.panel)
 
-            Divider().background(Theme.line)
-
-            VStack(spacing: 0) {
-                tabBar
                 Divider().background(Theme.line)
-                Group {
-                    switch tab {
-                    case .sample: mainPane
-                    case .train: TrainView()
+
+                VStack(spacing: 0) {
+                    tabBar
+                    Divider().background(Theme.line)
+                    Group {
+                        switch tab {
+                        case .sample: mainPane
+                        case .train: TrainView()
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.base)
             }
-            .background(Theme.base)
+
+            // Machine-stats strip — sticky bottom, mono+compact
+            Divider().background(Theme.line)
+            machineStatsBar
         }
         .onAppear {
             galleryItems = GalleryDiscovery.discover()
+        }
+    }
+
+    private var machineStatsBar: some View {
+        HStack(spacing: 16) {
+            statsBlock("CHIP", stats.cpuModel.replacingOccurrences(of: "Apple ", with: ""))
+            statsBlock("CORES", "\(stats.cpuCores)")
+            statsBlock("GPU", stats.gpuName.isEmpty ? "—" : stats.gpuName)
+            Divider().frame(height: 18).background(Theme.line)
+            statsBlock("APP RAM", FormatBytes.compact(stats.processRSSBytes))
+            statsBlock("FREE RAM", FormatBytes.compact(stats.freeRAMBytes))
+            statsBlock("TOTAL", FormatBytes.compact(stats.totalRAMBytes))
+            Spacer()
+            statsBlock("GPU MAX SET", "\(stats.gpuRegistryMB) MB")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Theme.panel2)
+    }
+
+    private func statsBlock(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.faint)
+                .tracking(1)
+            Text(value)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(Theme.fg)
         }
     }
 

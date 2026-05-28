@@ -6,6 +6,8 @@ struct TrainView: View {
     @State private var corpusText: String = "(no corpus loaded — drop a UTF-8 text file or pick one below)"
     @State private var hasRealCorpus: Bool = false
     @State private var corpusBytes: Int = 0
+    @State private var availableCorpora: [CorpusItem] = []
+    @State private var selectedCorpus: CorpusItem? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,10 +64,45 @@ struct TrainView: View {
                         .font(.system(size: 11, design: .monospaced))
                 }
 
-                Button(hasRealCorpus ? "Corpus (\(formattedBytes(corpusBytes)))" : "Load corpus…") {
-                    pickCorpus()
+                // Starter corpora menu — one click loads any of the
+                // fetched Project Gutenberg classics or browser gallery
+                // corpora. Falls through to "Other..." for arbitrary files.
+                Menu {
+                    if availableCorpora.isEmpty {
+                        Text("no corpora found — run scripts/fetch_corpora.sh").disabled(true)
+                    }
+                    ForEach(availableCorpora) { c in
+                        Button {
+                            loadCorpus(c)
+                        } label: {
+                            HStack {
+                                Text(c.icon)
+                                Text(c.displayName)
+                                Spacer()
+                                Text(formattedBytes(c.size))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Other file…") { pickCorpus() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if let sel = selectedCorpus {
+                            Text(sel.icon)
+                            Text(sel.displayName)
+                            Text("(\(formattedBytes(corpusBytes)))")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(Theme.faint)
+                        } else if hasRealCorpus {
+                            Text("Corpus (\(formattedBytes(corpusBytes)))")
+                        } else {
+                            Text("Pick corpus…")
+                        }
+                    }
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderlessButton)
+                .frame(maxWidth: 200)
 
                 Spacer()
 
@@ -122,6 +159,7 @@ struct TrainView: View {
             .padding(.vertical, 16)
         }
         .background(Theme.base)
+        .onAppear { availableCorpora = CorpusDiscovery.discover() }
     }
 
     private func statBlock(label: String, value: String) -> some View {
@@ -135,6 +173,20 @@ struct TrainView: View {
                 .foregroundStyle(Theme.fg)
         }
         .frame(minWidth: 60, alignment: .leading)
+    }
+
+    private func loadCorpus(_ c: CorpusItem) {
+        do {
+            let text = try String(contentsOf: c.url, encoding: .utf8)
+            corpusText = text
+            corpusBytes = text.utf8.count
+            hasRealCorpus = true
+            selectedCorpus = c
+        } catch {
+            corpusText = "(couldn't load \(c.url.lastPathComponent): \(error))"
+            hasRealCorpus = false
+            selectedCorpus = nil
+        }
     }
 
     private func pickCorpus() {
