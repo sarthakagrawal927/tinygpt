@@ -13,8 +13,23 @@ import MLXFast
 /// fused kernel cuts it dramatically vs. naive `qk^T → softmax → v`.
 public final class CausalSelfAttention: Module {
     public let nHeads: Int
+    /// Number of K/V heads. Equal to nHeads in standard multi-head
+    /// attention; less than nHeads in Grouped Query Attention (Llama-3,
+    /// Mistral, modern HF models). When nKvHeads < nHeads, each KV head
+    /// is broadcast across `nHeads / nKvHeads` query heads.
+    public let nKvHeads: Int
     public let headDim: Int
     public let scale: Float
+    /// RoPE base frequency. Standard transformer uses learned absolute
+    /// position embeddings (RoPE off). HF models use RoPE — they rotate
+    /// Q and K by an angle proportional to position before the attention
+    /// matmul. When > 0, RoPE is applied with this base (typically 10000
+    /// or 500000).
+    public let ropeBase: Float
+    /// `true` means RoPE is applied. When false (the default for our
+    /// from-scratch models), absolute learned position embeddings are
+    /// used (added to the input embedding upstream).
+    public let useRoPE: Bool
 
     @ModuleInfo(key: "q_proj") public var qProj: Linear
     @ModuleInfo(key: "k_proj") public var kProj: Linear
@@ -23,12 +38,18 @@ public final class CausalSelfAttention: Module {
 
     public init(_ cfg: ModelConfig) {
         self.nHeads = cfg.nHeads
+        self.nKvHeads = cfg.nKvHeads
         self.headDim = cfg.headDim
         self.scale = 1.0 / sqrt(Float(cfg.headDim))
-        self._qProj.wrappedValue = Linear(cfg.dModel, cfg.dModel)
-        self._kProj.wrappedValue = Linear(cfg.dModel, cfg.dModel)
-        self._vProj.wrappedValue = Linear(cfg.dModel, cfg.dModel)
-        self._oProj.wrappedValue = Linear(cfg.dModel, cfg.dModel)
+        self.ropeBase = cfg.ropeBase
+        self.useRoPE = cfg.useRoPE
+        // Q goes from dModel to (nHeads * headDim) = dModel — unchanged
+        // K, V go to (nKvHeads * headDim) which is smaller for GQA models
+        let kvDim = cfg.nKvHeads * cfg.headDim
+        self._qProj.wrappedValue = Linear(cfg.dModel, cfg.dModel, bias: cfg.attnBias)
+        self._kProj.wrappedValue = Linear(cfg.dModel, kvDim, bias: cfg.attnBias)
+        self._vProj.wrappedValue = Linear(cfg.dModel, kvDim, bias: cfg.attnBias)
+        self._oProj.wrappedValue = Linear(cfg.dModel, cfg.dModel, bias: cfg.attnBias)
         super.init()
     }
 
@@ -38,16 +59,26 @@ public final class CausalSelfAttention: Module {
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
         let B = x.shape[0]
         let T = x.shape[1]
-        // q, k, v: [B, T, C] → [B, n_heads, T, head_dim]
-        let q = qProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
-        let k = kProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
-        let v = vProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
+        // Q: full nHeads heads. K, V: nKvHeads heads (= nHeads in standard
+        // attention; less for Grouped Query Attention).
+        var q = qProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
+        var k = kProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
+        let v = vProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
 
-        // Fused fast attention with built-in causal masking — the highest-
-        // impact perf primitive on the Mac side. In practice (verified
-        // empirically against a known-good model) the function returns
-        // output in [B, H, T, head_dim] layout, despite docs suggesting
-        // otherwise; transpose to [B, T, H, head_dim] before reshape.
+        // RoPE: rotate Q and K (not V) by position-dependent angles.
+        // Standard transformers add learned absolute position embeddings
+        // upstream; HF-style models skip that and apply RoPE here instead.
+        if useRoPE {
+            q = MLXFast.RoPE(q, dimensions: headDim, traditional: false,
+                              base: ropeBase, scale: 1.0, offset: 0)
+            k = MLXFast.RoPE(k, dimensions: headDim, traditional: false,
+                              base: ropeBase, scale: 1.0, offset: 0)
+        }
+
+        // Fused fast attention with built-in causal masking. MLX-Fast's
+        // SDPA natively supports unequal Q vs KV head counts — when
+        // nKvHeads < nHeads, the kernel broadcasts each KV head across
+        // nHeads/nKvHeads Q heads internally (zero-copy).
         let out = MLXFast.scaledDotProductAttention(
             queries: q, keys: k, values: v, scale: scale, mask: .causal
         )
@@ -72,6 +103,38 @@ public final class MLP: Module {
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
         return fcOut(gelu(fcIn(x)))
+    }
+}
+
+/// SwiGLU MLP — gated variant used by Llama 2+, Mistral, Phi-3, Qwen,
+/// Gemma, LFM. Three linears instead of two:
+///
+///     y = down( silu(up(x)) * gate(x) )
+///
+/// `gate(x)` produces an element-wise "soft on/off" signal that the
+/// network can learn to use to suppress unwanted features, instead of
+/// only being able to add more on top (which is all a plain MLP can do).
+///
+/// In HuggingFace param names:
+///   up_proj   = `fcUp`
+///   gate_proj = `fcGate`
+///   down_proj = `fcDown`
+public final class SwiGLU: Module {
+    @ModuleInfo(key: "up_proj")   public var fcUp: Linear
+    @ModuleInfo(key: "gate_proj") public var fcGate: Linear
+    @ModuleInfo(key: "down_proj") public var fcDown: Linear
+
+    public init(dModel: Int, dMlp: Int, bias: Bool = false) {
+        // SwiGLU MLPs in modern HF models are bias-free (Llama/Mistral
+        // family). Plain MLP keeps biases; pass `bias: true` if needed.
+        self._fcUp.wrappedValue   = Linear(dModel, dMlp, bias: bias)
+        self._fcGate.wrappedValue = Linear(dModel, dMlp, bias: bias)
+        self._fcDown.wrappedValue = Linear(dMlp, dModel, bias: bias)
+        super.init()
+    }
+
+    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+        return fcDown(silu(fcUp(x)) * fcGate(x))
     }
 }
 

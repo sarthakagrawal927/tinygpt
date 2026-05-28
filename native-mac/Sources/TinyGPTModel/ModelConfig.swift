@@ -9,12 +9,34 @@ public struct ModelConfig: Sendable, Equatable {
     public var contextLength: Int
     public var nLayers: Int
     public var nHeads: Int
+    /// Number of K/V heads. Defaults to `nHeads` (= standard multi-head
+    /// attention). Set to less than `nHeads` for Grouped Query Attention
+    /// (e.g., Llama-3-8B: nHeads=32, nKvHeads=8). Must divide nHeads.
+    public var nKvHeads: Int
     public var dModel: Int
     public var dMlp: Int
     public var dropout: Float
     public var tieEmbeddings: Bool
     /// `"float32"` or `"float16"`. Default is float32 for training parity.
     public var dtype: String
+    /// Use RoPE rotary embeddings instead of learned absolute positional
+    /// embeddings. Required to load HF models (Llama, Mistral, Phi, etc.).
+    /// When true, the model SKIPS the position_embedding lookup and
+    /// instead has CausalSelfAttention rotate Q, K by the position.
+    public var useRoPE: Bool
+    /// RoPE base frequency. Standard is 10000; Llama-3 uses 500000 for
+    /// extended context.
+    public var ropeBase: Float
+    /// Use RMSNorm instead of LayerNorm. HF models almost universally
+    /// use RMSNorm.
+    public var useRMSNorm: Bool
+    /// Use SwiGLU MLP instead of plain GELU. HF models almost
+    /// universally use SwiGLU.
+    public var useSwiGLU: Bool
+    /// Attention has bias terms. PyTorch's nn.Linear has bias=True by
+    /// default; HF Llama-style models set bias=False to save params and
+    /// improve training stability.
+    public var attnBias: Bool
 
     public var headDim: Int { dModel / nHeads }
 
@@ -32,23 +54,37 @@ public struct ModelConfig: Sendable, Equatable {
         contextLength: Int = 128,
         nLayers: Int = 4,
         nHeads: Int = 4,
+        nKvHeads: Int? = nil,
         dModel: Int = 128,
         dMlp: Int = 512,
         dropout: Float = 0.0,
         tieEmbeddings: Bool = true,
-        dtype: String = "float32"
+        dtype: String = "float32",
+        useRoPE: Bool = false,
+        ropeBase: Float = 10_000,
+        useRMSNorm: Bool = false,
+        useSwiGLU: Bool = false,
+        attnBias: Bool = true
     ) {
         self.modelName = modelName
         self.vocabSize = vocabSize
         self.contextLength = contextLength
         self.nLayers = nLayers
         self.nHeads = nHeads
+        self.nKvHeads = nKvHeads ?? nHeads
         self.dModel = dModel
         self.dMlp = dMlp
         self.dropout = dropout
         self.tieEmbeddings = tieEmbeddings
         self.dtype = dtype
+        self.useRoPE = useRoPE
+        self.ropeBase = ropeBase
+        self.useRMSNorm = useRMSNorm
+        self.useSwiGLU = useSwiGLU
+        self.attnBias = attnBias
         precondition(dModel % nHeads == 0, "d_model must be divisible by n_heads")
+        precondition(nHeads % self.nKvHeads == 0,
+                     "n_heads (\(nHeads)) must be divisible by n_kv_heads (\(self.nKvHeads)) for GQA")
     }
 
     /// Match the browser's "Huge" preset (12L, d=256, ctx=256, 8 heads, dMlp=1024).
