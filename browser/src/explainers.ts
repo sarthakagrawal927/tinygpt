@@ -192,6 +192,10 @@ export const EXPLAINERS: Record<string, Explainer> = {
       label: "web.dev — COOP/COEP",
     },
   },
+  gpuMem: {
+    title: "GPU memory footprint",
+    body: "How much GPU memory the current model occupies. Computed as 12 bytes per parameter — each weight needs the f32 value itself plus its two AdamW optimizer moments (m and v) for resuming training. A 9.6M-param Huge model = ~110 MB of persistent GPU buffers, regardless of whether you're sampling or training. During training there's additional transient memory (per-step activations + gradients, typically 30-100 MB more on Huge) but that's released between steps. Note: WebGPU doesn't expose actual GPU memory usage to the page — this number is OUR allocation accounting, which is the only thing we can measure precisely.",
+  },
   f16Storage: {
     title: "f16-storage matmul",
     body: "The matmul kernel reads weight tensors from a packed-half (f16) GPU buffer instead of the usual f32 — half the bytes per K-step, accumulation stays in f32 for numerical safety. Activates after the startup numerics gate confirms loss is preserved (max relative error < 5%, mean < 0.5% against the f32 reference). On bandwidth-bound matmuls this is ~1.5-2× faster; on Apple Silicon WebGPU the matmul path IS bandwidth-bound, so this lights up across the board. Uses pack2x16float / unpack2x16float — core WGSL, available on every WebGPU device (no shader-f16 extension needed).",

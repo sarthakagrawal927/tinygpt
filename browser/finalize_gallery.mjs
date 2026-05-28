@@ -197,6 +197,43 @@ async function fp16PackCanonical(srcPath, dstPath) {
   return { copied: false, srcBytes: buf.length, dstBytes: final.length };
 }
 
+/** Read the .tinygpt header and compute param count from its config. The
+ *  canonical (training-state) file is the source of truth; falls back to
+ *  the destination (fp16-packed) file when only that exists. Returns 0
+ *  if neither is present — caller falls back to a static estimate. */
+async function readConfigFromTinyGpt(filePath) {
+  try {
+    const buf = await fs.readFile(filePath);
+    if (buf.length < 12) return null;
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const magic = String.fromCharCode(buf[0], buf[1], buf[2], buf[3]);
+    if (magic !== "TGPT") return null;
+    const headerLen = view.getUint32(8, true);
+    const header = JSON.parse(new TextDecoder().decode(buf.subarray(12, 12 + headerLen)));
+    return header.config ?? null;
+  } catch { return null; }
+}
+
+/** Param count from a model config: per-layer matmul shapes + embeddings +
+ *  layernorm scales. Matches the manifest layout in browser/src/main.ts. */
+function paramsFromManifestConfig(cfg) {
+  const { layers: L, dModel: C, ctx: T } = cfg;
+  const M = cfg.dMlp ?? C * 4;
+  const V = 256;
+  let n = 0;
+  n += V * C;             // token_embedding
+  n += T * C;             // position_embedding
+  n += 2 * C;             // ln_final (weight + bias)
+  for (let i = 0; i < L; i++) {
+    n += 2 * C;           // ln1 (weight + bias)
+    n += 4 * (C * C + C); // q/k/v/o projections (weight + bias each)
+    n += 2 * C;           // ln2 (weight + bias)
+    n += C * M + M;       // fc_in (weight + bias)
+    n += M * C + C;       // fc_out (weight + bias)
+  }
+  return n;
+}
+
 async function readJsonIfExists(path) {
   try { return JSON.parse(await fs.readFile(path, "utf8")); }
   catch { return null; }
@@ -258,6 +295,17 @@ for (const slot of SLOTS) {
     : (slot.staticTrainLoss ?? "");
   const steps = meta?.steps ?? slot.staticSteps ?? 5000;
 
+  // Compute GPU memory footprint from the model's config. Read the
+  // .tinygpt header (canonical preferred, dst fallback) for the exact
+  // config, then walk the manifest. Each param holds w (f32) + Adam m +
+  // Adam v = 12 bytes persistent on the GPU. f16-storage adds a 2-byte
+  // mirror per param when active. The 12-byte figure shown is what a
+  // loaded model occupies regardless of inference vs training mode.
+  const cfgSource = (canonicalExists && canonicalSrc) || dstPath;
+  const tinygptConfig = await readConfigFromTinyGpt(cfgSource);
+  const paramCount = tinygptConfig ? paramsFromManifestConfig(tinygptConfig) : 0;
+  const gpuBytes = paramCount * 12;
+
   built.push({
     id: slot.id,
     name: slot.name,
@@ -267,10 +315,12 @@ for (const slot of SLOTS) {
     corpusUrl: slot.corpusUrl,
     file: `${slot.id}.tinygpt`,
     params,
+    paramCount,
     trainLoss,
     steps,
     sample: trimSample(sampleText),
     fileBytes: conv?.dstBytes ?? null,
+    gpuBytes,
   });
 }
 

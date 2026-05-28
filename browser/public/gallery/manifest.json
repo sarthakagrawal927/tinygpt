@@ -11,10 +11,12 @@
       "corpusUrl": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
       "file": "shakespeare.tinygpt",
       "params": "9.6M",
+      "paramCount": 9608704,
       "trainLoss": "1.22",
       "steps": 5000,
       "sample": "MENENIUS:\nThen you shall hear from a kinsman, ay, my lord.\n\nFIRST CITIZEN:\nWhat trade art thou? Speak, …",
-      "fileBytes": 19253009
+      "fileBytes": 19253009,
+      "gpuBytes": 115304448
     },
     {
       "id": "tinystories",
@@ -25,10 +27,12 @@
       "corpusUrl": "https://huggingface.co/datasets/roneneldan/TinyStories",
       "file": "tinystories.tinygpt",
       "params": "9.6M",
+      "paramCount": 9608704,
       "trainLoss": "0.89",
       "steps": 5000,
       "sample": "Once upon a time, there was a penny girl named Lily. She loved to play with her toys and always dress. One day, she saw a big bird whole wanted to see what was the table. She sat down on the monket and the nespecial stopped on the way and blocked on",
-      "fileBytes": 19252815
+      "fileBytes": 19252815,
+      "gpuBytes": 115304448
     },
     {
       "id": "code",
@@ -39,10 +43,12 @@
       "corpusUrl": "https://huggingface.co/datasets/codeparrot/github-code-clean",
       "file": "code.tinygpt",
       "params": "9.6M",
+      "paramCount": 9608704,
       "trainLoss": "0.59",
       "steps": 5000,
       "sample": "def _feed_ids:\n        if feed_id:\n            redializer_feeds(feed_ids)\n                feed_ids = RUserSubscribedusSing(feed_ids, feed_ids, …",
-      "fileBytes": 19252805
+      "fileBytes": 19252805,
+      "gpuBytes": 115304448
     }
   ]
 }

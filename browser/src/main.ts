@@ -605,6 +605,9 @@ els.start.addEventListener("click", () => {
   // arrive), so the x-axis spans 0..maxSteps from frame one. Otherwise
   // early points crowd into the left edge as the axis auto-scales.
   chart.setMaxStep(parseInt(byId<HTMLInputElement>("maxSteps").value, 10) || 0);
+  // Surface the model's GPU footprint as a live pill — same as the
+  // gallery-load flow, but computed from the in-progress training config.
+  setGpuMemPill(estimateParams(cfg.layers, cfg.dModel, cfg.ctx));
   setOutput("Training… generate once a few steps have run.", true);
   setStatus("");
   setProgress(0, 1);
@@ -813,6 +816,8 @@ byId<HTMLButtonElement>("reset").addEventListener("click", () => {
   (window as unknown as { __tgGoToSetup?: () => void }).__tgGoToSetup?.();
   const banner = document.getElementById("demoBanner");
   if (banner) banner.hidden = false;
+  // Hide the live GPU mem pill — no model means no live footprint.
+  setGpuMemPill(null);
 });
 
 els.continueBtn.addEventListener("click", () => {
@@ -2609,6 +2614,11 @@ async function init(): Promise<void> {
     `<span class="pill off">${hw.cores} cores${ramBit}</span>` +
     `<button type="button" class="pill off pill-btn" id="heapPill" data-explain="heap" title="JS heap used">heap —</button>` +
     `<span class="pill off" id="gpuPill" hidden></span>` +
+    // Live model footprint on the GPU — set by setGpuMemPill() when a
+    // gallery model loads or a fresh training run starts. Persistent
+    // buffers only (weights + Adam state); per-step activations are
+    // transient and not counted.
+    `<button type="button" class="pill on pill-btn" id="gpuMemPill" data-explain="gpuMem" hidden>GPU mem: –</button>` +
     `<span id="gpuAccel" class="gpu-accel">${acceleratorPills.join("")}</span>` +
     `<span class="muted" style="margin-left:6px">` +
     `Suggested: <strong>${rec.layers}L · d_model ${rec.dModel} · ctx ${rec.ctx}</strong> ` +
@@ -2992,6 +3002,27 @@ function setupSpeedNudge(): void {
   });
 }
 
+/** Update the live "GPU mem: N MB" pill. Called when a gallery model
+ *  loads or a fresh training run starts. Bytes = 12 × params (weights +
+ *  Adam m + Adam v, all f32). Activations are transient per-step and not
+ *  counted here. Hide with bytes=null. */
+function setGpuMemPill(paramCount: number | null): void {
+  const pill = document.getElementById("gpuMemPill") as HTMLButtonElement | null;
+  if (!pill) return;
+  if (!paramCount || paramCount <= 0) {
+    pill.hidden = true;
+    return;
+  }
+  const bytes = paramCount * 12;
+  const mb = bytes / 1024 / 1024;
+  pill.textContent = `GPU mem: ${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  pill.title =
+    `${paramCount.toLocaleString()} params × (w + Adam m + Adam v) f32 = ` +
+    `${Math.round(bytes / 1024 / 1024)} MB persistent on GPU. Per-step ` +
+    `activations are transient and not counted.`;
+  pill.hidden = false;
+}
+
 /** Add or remove a +coop-matrix pill once the worker probes it post-device-creation. */
 function updateGpuAccelPills(extras: { cooperativeMatrix?: boolean }): void {
   const slot = document.getElementById("gpuAccel");
@@ -3028,9 +3059,13 @@ interface GalleryModel {
   corpusUrl?: string;
   file: string;          // path relative to /gallery/
   params?: string;
+  paramCount?: number;
   trainLoss?: string;
   steps?: number;
   sample?: string;
+  /** Persistent GPU buffer footprint when loaded (weights + Adam state).
+   *  Doesn't include activations (those are per-step transients). */
+  gpuBytes?: number;
 }
 interface GalleryManifest {
   version: number;
@@ -3118,6 +3153,7 @@ function renderGallery(
     if (m.params) bits.push(`<em>${m.params}</em> params`);
     if (m.trainLoss) bits.push(`loss ${m.trainLoss}`);
     if (m.steps) bits.push(`${m.steps} steps`);
+    if (m.gpuBytes) bits.push(`${Math.round(m.gpuBytes / 1024 / 1024)} MB GPU`);
     if (m.corpus) bits.push(m.corpus);
     stats.innerHTML = bits.join(" · ");
 
@@ -3146,9 +3182,12 @@ async function loadGalleryCard(
     const blob = await resp.blob();
     const file = new File([blob], m.file, { type: "application/octet-stream" });
     await loadModelFromFile(file, `${m.name} (gallery)`);
+    // Surface the loaded model's GPU footprint as a live pill in the
+    // capability cluster — answers "how much of my GPU is being used".
+    if (m.paramCount) setGpuMemPill(m.paramCount);
     dialog.close();
-    const banner = document.getElementById("demoBanner");
-    if (banner) banner.hidden = true;
+    // Keep the banner visible; user explicitly asked for the gallery to
+    // stay reachable from Setup after loading a model.
     // Take the user straight to the Watch & sample screen and focus Generate.
     // Worker's "restored" message lands a tick after loadModelFromFile resolves.
     (window as unknown as { __tgGoToWatch?: () => void }).__tgGoToWatch?.();
