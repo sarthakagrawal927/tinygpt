@@ -196,3 +196,39 @@ The session closed with several open calls deliberately not made:
 - **Whether to invest in a real evaluation harness.** Loss is published. Perplexity on a held-out chunk is not. Sample quality is judged by eyeballing. A small eval suite would tighten the honesty story; it would also pull effort from the next feature.
 
 These are not the unknowns. These are the known unknowns that have a decision waiting on the next session's first hour.
+
+---
+
+## Second session — the browser-frontier perf quest
+
+### Decision 18: Don't post to HN yet; first lock down the opportunistic-edge perf push
+**When:** Late in the gallery-build thread, after the gallery dialog + manifest + Shakespeare entry had landed and three new corpora (TinyStories, code, recipes) were ready to train.
+**Context:** The agent was preparing to ship the gallery and post to HN. The user asked whether there was a way to make in-browser training 30-40× faster.
+**The trigger:** Sarthak's direction — "I just want the best possible performance for the people who are at the latest version and we can do a graceful degradation depending on what's available… also inform them about it" — followed by "we can prompt users to enable `chrome://flags#enable-unsafe-webgpu` for further speed."
+**The call:** Pause the HN launch. Build the full opportunistic-acceleration stack — storage-f16, shader-f16, cooperative matrix, WebNN inference — each gated on feature detection, each surfaced in the capability pills, with a soft dismissible nudge for Chromium users who don't yet have the experimental flag enabled. Ship the gallery on the now-faster path so the launch's "trained in this browser" claim has the new speed behind it.
+**Why it was right:** The Mac app (lever 20) is ~30× over WebGPU because it has access to MLX + Metal + ANE. Stacking every browser frontier together gets ~3-5× on flag-enabled Chrome — small next to the Mac app but real for the 1% of HN visitors who already run `chrome://flags#enable-unsafe-webgpu`. More importantly, the capability pill + nudge UI makes the bleeding edge visible — the page itself becomes a demonstration of where browser ML can reach today.
+**What it shipped (foundation, commit `28f2533`):** `webgpu/tensor.ts` extended to opportunistically request `subgroups` + `shader-f16` + `timestamp-query` and probe cooperative-matrix via trial shader compile; `runtime_detect.ts` carries `gpuFeatures: GpuSubFeatures` + `webnnPresent`; `main.ts` renders `+f16` / `+subgroups` / `+WebNN` pills + a dismissible "Power user?" nudge; `explainers.ts` carries four new pill explainers; roadmap lever 21 ("Browser frontier — tech we're tracking") catalogues each lever with expected gain + skip rationale + revisit trigger. The kernel work itself (storage-f16 → shader-f16 → cooperative matrix → WebNN) is queued as tasks #90-#94 with the hard rule **no quality regression on any fast path** — each must pass a 500-step Shakespeare loss-curve gate or auto-disable.
+
+---
+
+### Decision 19: Refuse to ship any fast path that regresses model quality
+**When:** Inside the opportunistic-acceleration scope conversation, immediately after Decision 18.
+**Context:** The four-lever push (storage-f16, shader-f16, cooperative matrix, WebNN) brings real precision risk — f16 accumulators can drift, cooperative-matrix is an experimental WGSL extension, WebNN routes through OS NN runtimes whose numerics behavior isn't fully specified. The temptation in a launch-prep window is to ship the speedup and ignore the drift.
+**The trigger:** Sarthak's constraint — "I just want to ensure that the model quality does not drop and the speed is as fast as whatever flags that the user has enabled on their Chrome."
+**The call:** Bake a hard numerics gate into every fast path. Train Shakespeare for 500 steps on each enabled path at first use; require the loss curve to match the f32 reference within 1% at step 500. Paths that fail the gate disable themselves silently for the session and the user gets the slower correct path. No path activates if it can't pass the gate.
+**Why it was right:** Opportunistic optimization without a correctness gate is a bug factory. Each new accelerator has its own precision profile, and "it ran faster" is the easy thing to measure and observe — "it produced subtly worse output" is the hard thing to notice without instrumentation. The gate makes "speed" a derived property of "speed AND correctness," not a substitute for correctness.
+**What it shipped:** The constraint is encoded in task #94's title ("Numerics gate: no quality regression on ANY fast path") and described in `docs/perf_quest.md`. Implementation lands alongside #90-#93 (one verifier per fast path; the gate also gets its own page `docs/precision.md` capturing measured deltas).
+
+---
+
+### Decision 20: Sequential under `caffeinate`, never parallel-on-one-GPU
+**When:** After 2 hours of failed parallel training during the gallery-build phase.
+**Context:** Three Playwright Chromium instances were launched concurrently to train TinyStories + code + recipes against the same M-series GPU. The reasoning was that the GPU could time-share. The reality: every model slowed from ~100 steps/min (solo) to ~17-30 steps/min (3-way share), plus three separate 15-minute stalls in each log when the system slept. After 2 hours, all three hit the 2-hour wall-clock cap at 40-46% completion — and none had downloaded, because the script's download step lives after training completion. The work was discarded.
+**The trigger:** All three background tasks notifying completion simultaneously, all with the same `Error: hard cap exceeded`. The pattern in the logs (uniform 15-min gaps across all three logs at the same wall-clock timestamps) pointed at display-sleep suspending the Chromium tabs.
+**The call:** Future training runs are **sequential**, one Playwright at a time, **wrapped in `caffeinate -i`** to block display sleep. Three sequential Huge runs at ~75 min each = 3.75 hr total — slower in theory than perfectly-parallel 3 × 75 min ÷ 3 = 75 min, but faster in practice than "parallel + contention + display sleep + zero output."
+**Why it was right:** GPU contention on a single GPU is sub-linear. The math is "3× the work to do" plus "1 GPU's worth of throughput" minus "scheduler thrash" — at best you'd expect 2× wall-time of sequential, not equal. Plus the OS isn't aware that a backgrounded Chromium tab is doing real work, so it sleeps the tab when the user's display sleeps. Both effects compound. Sequential side-steps both.
+**What it shipped:** Task #85's description now reads "Retrain gallery (sequential, caffeinate, after perf work)." The gallery retrain is queued for the post-perf-work phase explicitly under this constraint, with no path back to parallel.
+
+---
+
+These three decisions reshape the next session: it's not a launch session. It's a perf-quest session. The gallery, the HN post, and the deploy all wait on it.
