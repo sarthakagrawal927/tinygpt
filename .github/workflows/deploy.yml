@@ -15,6 +15,16 @@
 #                            a custom token with: Account → Cloudflare Pages → Edit.
 #   CLOUDFLARE_ACCOUNT_ID — your account ID. Found at:
 #                            https://dash.cloudflare.com/ → any project sidebar.
+#
+# Optional GitHub secrets (analytics):
+#   VITE_POSTHOG_KEY     — PostHog project API key (phc_...). When unset
+#                            the analytics module logs "Analytics disabled"
+#                            and the page works exactly as before. Vite
+#                            inlines this at build time, so it lives in the
+#                            shipped JS — that's fine, PostHog project keys
+#                            are designed to be public ingest tokens.
+#   VITE_POSTHOG_HOST    — optional override of the ingest host. Defaults
+#                            to https://us.i.posthog.com when unset.
 
 name: Deploy to Cloudflare Pages
 
@@ -53,6 +63,13 @@ jobs:
 
       - name: Build (copy docs + tsc + astro build)
         working-directory: browser
+        env:
+          # Vite reads VITE_*-prefixed env vars at build time and inlines
+          # them into the JS bundle. analytics.ts reads VITE_POSTHOG_KEY
+          # and falls back to no-op when empty — so leaving the secret
+          # unset just disables analytics; doesn't break the build.
+          VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
+          VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
         run: npm run build
 
       - name: Deploy to Cloudflare Pages
