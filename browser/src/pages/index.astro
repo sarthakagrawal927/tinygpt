@@ -2562,6 +2562,17 @@ const pageStyle = `
         border-top: 1px solid var(--line);
       }
       .footer-meta .brand-line { color: var(--faint); }
+      .footer-meta .brand-line a {
+        color: var(--muted);
+        text-decoration: none;
+        border-bottom: 1px dashed var(--line-strong);
+        padding-bottom: 1px;
+        transition: color 0.15s ease, border-color 0.15s ease;
+      }
+      .footer-meta .brand-line a:hover {
+        color: var(--accent);
+        border-bottom-color: var(--accent-dim);
+      }
       .footer-meta .footer-links {
         display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
       }
@@ -3440,7 +3451,10 @@ const pageBody = `
 
       <footer class="notes">
         <div class="footer-meta">
-          <span class="brand-line">TinyGPT — byte-level transformer trained in a browser tab</span>
+          <span class="brand-line">
+            TinyGPT — byte-level transformer trained in a browser tab
+            · by <a href="https://sarthakagrawal.dev" rel="me">Sarthak Agrawal&nbsp;→</a>
+          </span>
           <nav class="footer-links" aria-label="Site sections">
             <a href="/docs">Docs</a>
             <a href="/speedup">Speedup</a>
