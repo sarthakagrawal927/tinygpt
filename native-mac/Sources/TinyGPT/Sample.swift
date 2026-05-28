@@ -13,7 +13,8 @@ enum Sample {
         var prompt = "ROMEO:"
         var maxTokens = 200
         var temperature: Float = 0.8
-        var useKVCache = true  // KV-cached path is the default; --no-cache reverts
+        var useKVCache = true
+        var loraPath: String? = nil
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -30,6 +31,9 @@ enum Sample {
                 useKVCache = false; i += 1
             case "--cache":
                 useKVCache = true; i += 1
+            case "--lora":
+                guard i + 1 < args.count else { exitUsage() }
+                loraPath = args[i + 1]; i += 2
             case "-h", "--help":
                 exitUsage()
             default:
@@ -70,6 +74,19 @@ enum Sample {
         } catch {
             fputs("error loading weights: \(error)\n", stderr)
             exit(1)
+        }
+        // Apply a LoRA adapter on top if provided. The injection swaps
+        // q/k/v/o/fc_* Linears for LoraLinear instances; loading the
+        // adapter's A, B matrices overwrites the freshly-initialised ones.
+        if let loraPath = loraPath {
+            do {
+                let adapter = try LoraAdapterReader.read(URL(fileURLWithPath: loraPath))
+                try LoraAdapterReader.apply(adapter, to: model)
+                print("loaded LoRA adapter: rank=\(adapter.header.rank) alpha=\(adapter.header.alpha) targets=\(adapter.header.targetSuffixes.joined(separator: ","))")
+            } catch {
+                fputs("error loading LoRA adapter: \(error)\n", stderr)
+                exit(1)
+            }
         }
         print("ready — \(formatLargeInt(model.numParameters())) params on \(Device.defaultDevice())")
         print("")
