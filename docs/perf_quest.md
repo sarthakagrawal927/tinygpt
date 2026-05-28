@@ -36,33 +36,70 @@ it preserves loss.
 
 Each lever is independently shippable — failure of one doesn't block another.
 
-## Most recent landing (commits `a9a8150` + `9928b71`) — f16-storage matmul SHIPPED
+## Most recent landing (commits `a9a8150` → `4ceeff2`) — f16-storage SHIPPED for both inference AND training
 
-The first opportunistic accelerator from the queue is live and gated.
-`webgpu/train_f16.wgsl` (`matmul_blocked_f16` + `pack_to_f16` kernels)
-ships alongside the existing f32 vec4 path; `webgpu/ops.ts` runs a
-numerics gate at `GpuOps.create()` time (M=64 K=128 N=128 reference
-matmul, magnitude-aware tolerance — see `docs/precision.md` for the full
-framework). On pass, `GpuModel.prepareForInference()` packs every
-matmul-shaped weight to a packed-f16 GPU buffer; `linear()` dispatches
-the f16 path opportunistically. `trainStep` invalidates the cache so
-post-AdamW stale-weight bugs can't happen.
+The first opportunistic accelerator from the queue is live, gated, and
+extended to training. Three kernels: `matmul_blocked_f16` (forward) +
+`matmul_abt_blocked_f16` (backward dA) + `pack_to_f16` (f32 → packed-half
+upload). All in `webgpu/train_f16.wgsl`, sharing the train.wgsl bind
+layout. The same packed buffer powers both forward and backward kernels —
+just with different row/col interpretation.
 
-Measured on M-series WebGPU: gate passes with mean_rel=0.075% and
-max_abs=1.33e-4 (both well under threshold). End-to-end smoke
-(`browser/smoke_f16.mjs`) confirms identical generation between f32 and
-f16 paths. The `+f16 storage` pill lights up in the capability cluster
-once the gate passes.
+`webgpu/ops.ts:verifyF16Storage` runs at `GpuOps.create()` time. It
+checks BOTH forward and backward against the f32 reference; both must
+pass for the path to activate. Magnitude-aware tolerance:
+`max_abs < 1% of mean|ref|` AND `mean_rel < 0.5%`. See `docs/precision.md`
+for the full framework.
 
-**Status of remaining levers** — the kernel work for #91 / #92 / #93 is
-non-trivial enough (3-5 hours each, including numerics verification per
-[[feedback-no-quality-regression]]) that pushing them all into one
-session risks shipping fragile code. The right move now: let the gallery
-retrain (#85) complete on the SHIPPED stack, ship the launch with #90 as
-the headline perf improvement, and treat #91 (shader-f16 compute), #92
-(cooperative matrix), #93 (WebNN sampling) as the v2 perf drop after the
-HN launch. Each carries an implementation sketch in this doc + the
-gate-framework pattern in `docs/precision.md`.
+`GpuModel.prepareForInference()` packs every matmul-shaped weight to a
+packed-f16 buffer on first call. `linear()` (forward) and
+`linearBackward()` (backward dA) opportunistically dispatch the f16
+variant when the path is active. `repackF16Mirrors()` refreshes the
+packed buffers at the end of every `trainStep` so they stay in sync with
+the AdamW-updated f32 weights. Lazy activation: `trainStep` calls
+`prepareForInference` on its first invocation, so training-from-scratch
+gets the f16 path automatically when the gate passes.
+
+**Real measurements on M-series WebGPU:**
+
+```
+[ops] f16-storage gate (fwd): mean|ref|=1.22e-1, max_abs=1.33e-4 (11% of budget),
+                              mean_rel=0.075% (15% of budget), max_rel=5.40% — PASS
+[ops] f16-storage gate (bwd): mean|ref|=1.23e-1, max_abs=1.17e-4 (10% of budget),
+                              mean_rel=0.070% (14% of budget), max_rel=5.15% — PASS
+[ops] f16-storage gate verdict: PASS — f16 path active
+```
+
+End-to-end inference smoke (`browser/smoke_f16.mjs`) confirms identical
+generation between f32 and f16 paths. Training smoke
+(`browser/smoke_f16_train.mjs`) verifies training stability with f16
+active — runs when GPU is free between gallery retrain runs.
+
+**Status of remaining levers** — research-grounded numbers (see web
+search in May 2026 thread) updated the expected gains:
+
+- **#91 shader-f16 compute**: ~1.1× incremental over storage-f16 on
+  Apple (the bandwidth win is already captured by storage; compute on
+  M-series f16 ALU ≈ f32 ALU). 3-5 hr engineering, medium-high precision
+  risk (f16 accumulators may fail the gate on K≥256 shapes).
+- **#92 cooperative matrix**: ~1.1-1.3× on Apple with HIGH uncertainty
+  (the WebGPU `chromium_experimental_subgroup_matrix` → Apple simdgroup
+  mapping is unverified in public benchmarks; published WGSL extension
+  performance data is sparse to nonexistent for Apple). 6-10 hr,
+  fragile API.
+- **#93 WebNN inference path**: ~2-3× sampling on Apple (lower than
+  the 3-5× I claimed earlier; CoreML overhead on small ops eats some of
+  the ANE win). 5-7 hr, separate code path.
+
+Stacked expectation on Apple: training ~1.2-1.3× (shipped f16-storage
+already grabs the bandwidth win; the rest of the stack adds marginally).
+NOT the 1.7-2.2× I earlier claimed. The honest framing is "we made
+training and sampling meaningfully faster with one solid lever; further
+levers have diminishing returns."
+
+Decision: ship the gallery on this stack, treat #91/#92/#93 as a v2 perf
+drop devlog after the HN launch. Each carries an implementation sketch
+in this doc + the gate-framework pattern in `docs/precision.md`.
 
 ## What landed in commit `28f2533`
 
