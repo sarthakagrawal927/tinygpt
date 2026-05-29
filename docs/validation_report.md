@@ -293,3 +293,34 @@ This is a "smoke" report — strong evidence the pieces compose, weak
 evidence on RELATIVE performance. Pulling the latter takes its own
 focused experiment + the leaderboard scorers extending to BPE
 models.
+
+---
+
+## Bugs the validation actually caught
+
+The point of running this report is not to feel good about the work
+— it's to catch the gaps between "compiles" and "works." Two real
+bugs landed during the validation that wouldn't have surfaced
+otherwise:
+
+1. **`tinygpt tuned-lens` crashed at the first gradient step** with
+   `Fatal error: [grad] Must specify at least one argument.` The
+   probe Linears were being attached to TinyGPTModel via post-init
+   assignment to an Optional @ModuleInfo field — MLX-Swift's
+   parameter discovery wasn't picking them up as trainable through
+   that path. Fix in commit `a64de95`: probes live in a standalone
+   `TunedLensProbes` Module; `valueAndGrad` targets that module
+   directly while the base model is closure-captured.
+
+2. **`npm run build` (production Astro) failed with a Vite parse
+   error** at `src/pages/index.astro:3315:16`:
+   `Expected ";" but found "tinygpt"`. Astro / esbuild's JSX-ish
+   parser interprets backticks inside HTML comments as
+   template-literal delimiters; the comment content then fails to
+   tokenise as JS. Fix in commit `9877bb7`: replaced backticks
+   with plain quotes in the comment around the `lensUploadLabel`.
+
+Both passed every prior check (Swift `swift build` was green; TypeScript
+`tsc --noEmit` was green) — only END-TO-END execution caught them.
+Lesson for future cycles: ship + validate is not the same as ship +
+compile.
