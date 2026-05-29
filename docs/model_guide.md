@@ -49,6 +49,13 @@ Intentionally small. The browser playground exposes a preset table from
 360k (Small) to ~470M (Behemoth via Memory64), backed by the same
 architecture.
 
+**Why float32 everywhere?** All training (Python, WASM, WebGPU) uses float32
+for numeric stability — gradients on tiny models are unforgiving and lower
+precision multiplied the loss-drift budget faster than it bought speed.
+f16 lives in the project as an *inference-only* path, gated behind the
+end-to-end parity tests (see the "f16-packed storage" entry in the README's
+"Negative results" section for what didn't pan out and why).
+
 ---
 
 ## 3. Data requirements

@@ -83,6 +83,8 @@ browser/src/content/docs/
 native-mac/.xcode-build/
 native-mac/.build/
 native-mac/Package.resolved
+# Xcode test coverage instrumentation (re-emitted on every test run)
+native-mac/default.profraw
 
 # uv venv for Python ANE conversion (local-only — managed by uv)
 python_ref/.venv/

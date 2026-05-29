@@ -16,6 +16,13 @@ three levels, with every gradient pinned down by a test.
 
 ![TinyGPT playground](browser/public/og-image.png)
 
+There is also a **native macOS app** — same model, same `.tinygpt` file
+format, no browser ceiling. It additionally loads any HuggingFace
+open-weight Llama-architecture model (SwiGLU + RoPE + GQA + RMSNorm +
+BPE) and LoRA-fine-tunes it on local text in minutes. The first
+end-to-end fine-tune cut held-out perplexity by 32% with a 788 KB
+adapter. Build instructions below.
+
 ## Why this exists
 
 It started as a teaching project — the goal was to build the whole modern LLM
@@ -71,6 +78,34 @@ every backward pass derived by hand, compiled to WebAssembly with Emscripten
 — every kernel finite-difference checked and parity-tested against the WASM
 reference. All three read and write the same `.tinygpt` binary file format,
 so a model trained in one path continues training in another.
+
+## Before reading the GPU kernels
+
+If you're stepping into `webgpu/train.wgsl` for the first time, three things
+save a lot of confusion:
+
+1. **WGSL `@compute` shaders.** Each invocation is one parallel thread;
+   `gid.x` is its work-item index. Think CUDA threads, no convenience layer.
+2. **Workgroup-shared memory.** `var<workgroup>` is a fast scratchpad shared
+   by threads in one workgroup; `var<private>` is per-thread but tiny.
+3. **Numerically-stable (online) softmax.** Subtract the per-row max before
+   `exp` so values stay in (0, 1] and never overflow — the unlock behind
+   Flash Attention. Long form in
+   [`docs/online_softmax_in_attention.md`](docs/online_softmax_in_attention.md).
+
+## What's intentionally not here
+
+So you know what *not* to look for:
+
+- **BatchNorm** — modern LLMs use LayerNorm.
+- **RoPE / rotary embeddings** — learned position embeddings are enough at
+  `context_length ≤ 512`.
+- **KV cache for inference** — this is a training project, no decode-time
+  optimisation.
+- **Mixed-precision training** — float32 throughout. f16 is inference-only
+  and only after parity gates pass (see "Negative results" for f16 on
+  training).
+- **Distributed / multi-GPU** — single device, one browser tab.
 
 ## What's interesting under the hood
 
@@ -179,16 +214,9 @@ machine, suggests a model size, shows a live training-time estimate, and
 saves checkpoints to OPFS so a run survives a refresh. WebGPU kicks in
 automatically on Chrome/Edge 113+ and Safari 18+.
 
-## What's next
+## On Flash Attention 2
 
-- **Pre-trained model gallery** — Cloudflare R2-hosted, manifest-driven; let
-  visitors load and continue-train from real checkpoints instead of just the
-  one shipped demo.
-- **Native macOS app** — MLX-Swift + SwiftUI, same `.tinygpt` file format both
-  ways, lifts the model-size ceiling into the 7B–30B range on Apple Silicon.
-  See [`docs/shared_vs_native.md`](docs/shared_vs_native.md) for the boundary.
-
-Flash Attention 2 used to live in this list; it shipped — see
+It used to live in a "what's next" list; it shipped — see
 [`docs/fa2_forward_notes.md`](docs/fa2_forward_notes.md) and
 [`docs/fa2_backward_notes.md`](docs/fa2_backward_notes.md). The forward
 runs workgroup-cooperative tiling with online softmax across K blocks;
@@ -207,7 +235,8 @@ tinygpt/
   data/         Dataset builder + example corpora
   docs/         The learning guide and the per-phase specs
   tests/        Correctness tests — finite-diff, overfit, end-to-end parity
-  native-mac/   (Planned) MLX-Swift macOS app
+  native-mac/   MLX-Swift macOS app (CLI + SwiftUI) — train, sample,
+                LoRA-fine-tune, load HuggingFace models, compare adapters
 ```
 
 ## Build it locally
@@ -222,11 +251,20 @@ python python_ref/train.py --overfit
 # Browser app
 bash wasm/build_wasm.sh          # needs Emscripten SDK
 cd browser && npm install && npm run dev
+
+# Mac CLI + app (needs Xcode, macOS 14+)
+cd native-mac
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+xcodebuild -scheme tinygpt -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .xcode-build build
+.xcode-build/Build/Products/Debug/tinygpt train --preset huge \
+  --corpus my-text.txt --steps 3000 --out my-model.tinygpt
 ```
 
 The C++ kernels can also be checked without Emscripten — `bash wasm/build_native.sh`
 builds and tests them with a normal compiler. Full deploy notes:
-[`docs/deploy.md`](docs/deploy.md).
+[`docs/deploy.md`](docs/deploy.md). Mac walkthrough:
+[`native-mac/ARCHITECTURE.md`](native-mac/ARCHITECTURE.md).
 
 ## Docs
 
@@ -236,9 +274,23 @@ builds and tests them with a normal compiler. Full deploy notes:
 - [`docs/lessons.md`](docs/lessons.md) — the bugs and surprises worth more than the kernels
 - [`docs/model_guide.md`](docs/model_guide.md) — the model, from scratch
 - [`docs/lora_guide.md`](docs/lora_guide.md) — LoRA fine-tuning
+- [`docs/training_phases.md`](docs/training_phases.md) — the three-phase pipeline: pretrain → SFT → DPO, with reproducible commands
+- [`docs/distillation.md`](docs/distillation.md) — knowledge distillation: making a tiny model punch above its weight
+- [`docs/moe.md`](docs/moe.md) — Mixture-of-Experts: more capacity per byte of weight
+- [`docs/mtp.md`](docs/mtp.md) — Multi-Token Prediction: denser training signal per step
+- [`docs/evolution_strategies.md`](docs/evolution_strategies.md) — gradient-free trainer (`tinygpt es`)
+- [`docs/interpretability.md`](docs/interpretability.md) — attention heatmap + logit lens in the playground
+- [`docs/phase_9_10_status.md`](docs/phase_9_10_status.md) — Phase 9 (quant) + Phase 10 (architecture menu): what shipped, what's queued, and the design for each remaining item
+- [`docs/memory_tradeoffs.md`](docs/memory_tradeoffs.md) — bf16, gradient accumulation, gradient checkpointing — what fits in 48 GB and why
+- [`docs/leaderboard.md`](docs/leaderboard.md) — benchmark framework + how to add a benchmark + how to submit a model
+- [`docs/single_machine_roadmap.md`](docs/single_machine_roadmap.md) — every technique that runs on one Mac, ROI-ranked, with explainers
+- [`HANDOFF.md`](HANDOFF.md) — current session handoff: what's running, what's queued, where to start
 - [`docs/online_softmax_in_attention.md`](docs/online_softmax_in_attention.md) — why and how, ties to the `attn_fused_sv` kernel
 - [`docs/shared_vs_native.md`](docs/shared_vs_native.md) — browser vs. native boundary
+- [`docs/CITATIONS.md`](docs/CITATIONS.md) — every architectural choice traced to a primary source
 - [`docs/feature_ideas.md`](docs/feature_ideas.md) — the future-ideas backlog
+- [`native-mac/ARCHITECTURE.md`](native-mac/ARCHITECTURE.md) — top-down tour of the Mac codebase
+- [`WHILE_YOU_SLEPT.md`](WHILE_YOU_SLEPT.md) — the most recent LoRA fine-tune writeup with reproducible commands
 
 ## License
 
