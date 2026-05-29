@@ -72,6 +72,7 @@ const els = {
   lensResult: byId<HTMLPreElement>("lensResult"),
   lensUpload: byId<HTMLInputElement>("lensUpload"),
   lensUploadLabel: byId<HTMLLabelElement>("lensUploadLabel"),
+  inspectDetails: byId<HTMLDetailsElement>("inspectDetails"),
   ablateLayer: byId<HTMLInputElement>("ablateLayer"),
   ablateTarget: byId<HTMLSelectElement>("ablateTarget"),
   runAblate: byId<HTMLButtonElement>("runAblate"),
@@ -924,31 +925,28 @@ function finalizeSampleAnalytics(text: string): void {
 /// inference, the bench select + Run button become accessible. The
 /// worker will gracefully skip with a reason if the active backend
 /// can't service `forwardLogits` (currently WASM).
+/// Toggle the "Inspect & evaluate" panel as a unit. When a model is
+/// loaded (and WebGPU is the active backend), the parent <details>
+/// is shown and the inner controls are enabled. When disabled, the
+/// parent is hidden — children stay disabled too so an accidental
+/// dev-tools "show me what's inside" doesn't surface broken UI.
 function setBenchAvailable(enabled: boolean): void {
-  els.benchSelect.hidden = !enabled;
-  els.runBench.hidden = !enabled;
+  els.inspectDetails.hidden = !enabled;
   els.benchSelect.disabled = !enabled;
   els.runBench.disabled = !enabled;
-  if (!enabled) els.benchResult.hidden = true;
-  // Logit lens shares the "model loaded" gate. Worker emits an
-  // `unavailable` payload when the backend can't service it (WASM today).
-  els.runLens.hidden = !enabled;
   els.runLens.disabled = !enabled;
-  els.lensUploadLabel.hidden = !enabled;
+  els.ablateLayer.disabled = !enabled;
+  els.ablateTarget.disabled = !enabled;
+  els.runAblate.disabled = !enabled;
   if (enabled) {
     els.lensUploadLabel.removeAttribute("disabled");
   } else {
     els.lensUploadLabel.setAttribute("disabled", "true");
+    // Clear any stale result panels when the model goes away.
+    els.benchResult.hidden = true;
+    els.lensResult.hidden = true;
+    els.ablateResult.hidden = true;
   }
-  if (!enabled) els.lensResult.hidden = true;
-  // Per-layer ablation controls share the same gate.
-  els.ablateLayer.hidden = !enabled;
-  els.ablateLayer.disabled = !enabled;
-  els.ablateTarget.hidden = !enabled;
-  els.ablateTarget.disabled = !enabled;
-  els.runAblate.hidden = !enabled;
-  els.runAblate.disabled = !enabled;
-  if (!enabled) els.ablateResult.hidden = true;
 }
 
 /// Render a logit-lens result as a compact text table: rows = layers,

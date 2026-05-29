@@ -2471,6 +2471,99 @@ const pageStyle = `
       .sample-note strong { color: var(--fg); font-weight: 500; }
       .sample-note a { color: var(--accent); text-decoration: underline; text-decoration-color: var(--accent-dim); }
 
+      /* Inspect & evaluate panel — collapsible <details> below the
+         sample output that groups the benchmark, lens, and ablation
+         surfaces. Default-collapsed so the Sample card stays focused
+         on the primary "generate text" action; expand to reach the
+         interpretability + scoring tools. */
+      .inspect-panel {
+        margin-top: 20px;
+        padding-top: 18px;
+        border-top: 1px solid var(--line);
+      }
+      .inspect-panel[hidden] { display: none; }
+      .inspect-panel > summary {
+        cursor: pointer;
+        font: 500 13px/1.2 var(--font-sans);
+        color: var(--fg);
+        list-style: none;
+        padding: 4px 0;
+        user-select: none;
+      }
+      .inspect-panel > summary::-webkit-details-marker { display: none; }
+      .inspect-panel > summary::before {
+        content: "▸";
+        display: inline-block;
+        margin-right: 8px;
+        transition: transform 120ms;
+        color: var(--muted);
+      }
+      .inspect-panel[open] > summary::before { transform: rotate(90deg); }
+      .inspect-section {
+        margin-top: 16px;
+        padding: 14px 14px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg-subtle, transparent);
+      }
+      .inspect-section h4 {
+        margin: 0 0 6px;
+        font: 500 13px/1.2 var(--font-sans);
+        color: var(--fg);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .inspect-tag {
+        font: 400 10.5px/1 var(--font-sans);
+        color: var(--muted);
+        background: var(--line);
+        padding: 2px 6px;
+        border-radius: 3px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .inspect-help {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 12px; line-height: 1.55;
+      }
+      .inspect-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .inspect-controls .inspect-inline {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font: 400 12px/1 var(--font-sans);
+        color: var(--muted);
+      }
+      .inspect-upload {
+        cursor: pointer;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 12px;
+      }
+      .inspect-upload[disabled] {
+        cursor: not-allowed;
+        opacity: 0.45;
+        pointer-events: none;
+      }
+      .inspect-pre {
+        margin-top: 10px;
+        overflow: auto;
+        font-size: 11px;
+        max-height: 360px;
+        padding: 10px;
+        background: var(--bg-subtle, transparent);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+
       /* Speed levers in Diagnostics card */
       .speed-levers { margin-bottom: 28px; }
       .speed-levers h3 {
@@ -3303,39 +3396,61 @@ const pageBody = `
             <input id="genTokens" type="number" value="300" min="16" max="512" />
           </div>
           <button id="sample" class="secondary" disabled>Generate</button>
-          <!-- Phase-1 benchmark runner. Hidden until a model is loaded and
-               the WebGPU backend is active (forwardLogits is WebGPU-only). -->
-          <select id="benchSelect" class="secondary" disabled hidden style="margin-left:6px"></select>
-          <button id="runBench" class="secondary" disabled hidden>Run benchmark</button>
-          <!-- Phase 8 interpretability: logit lens. Shows what each layer
-               "would predict" if it stopped there — a window into when
-               specific knowledge first appears in the residual stream. -->
-          <button id="runLens" class="secondary" disabled hidden style="margin-left:6px">Logit lens</button>
-          <!-- Optional tuned-lens sidecar: upload a .lenses file from
-               "tinygpt tuned-lens" to use trained per-layer projection
-               probes instead of the raw final-LN + LM-head lens. -->
-          <label id="lensUploadLabel" class="secondary" disabled hidden style="margin-left:4px;cursor:pointer;padding:6px;border:1px solid #ccc;border-radius:4px;font-size:11px" title="Upload .lenses sidecar for tuned-lens projection">
-            🎯<input id="lensUpload" type="file" accept=".lenses" style="display:none" />
-          </label>
-          <!-- Per-layer ablation: zero out a chosen component at a chosen
-               layer, then sample. The result reveals how load-bearing that
-               component is to the model's behaviour. -->
-          <input id="ablateLayer" type="number" min="0" value="0" disabled hidden style="width:48px;margin-left:6px" title="Layer to ablate" />
-          <select id="ablateTarget" class="secondary" disabled hidden title="Component to zero">
-            <option value="attn">attn</option>
-            <option value="mlp">mlp</option>
-            <option value="all">whole layer</option>
-          </select>
-          <button id="runAblate" class="secondary" disabled hidden>Ablate &amp; sample</button>
         </div>
-        <div id="ablateResult" class="sample-stats" hidden></div>
         <div class="sample-output-wrap">
           <div id="output" class="empty">Train a model, then generate text here.</div>
           <button id="copyOutput" class="copy-output" type="button" title="Copy generated text" hidden aria-label="Copy generated text">⧉</button>
         </div>
         <div id="sampleStats" class="sample-stats" hidden></div>
-        <div id="benchResult" class="sample-stats" hidden></div>
-        <pre id="lensResult" class="sample-stats" hidden style="overflow:auto;font-size:11px;max-height:400px"></pre>
+
+        <!-- Inspect & evaluate — collapsible block bundling the
+             interpretability and benchmark surfaces (Phase 1 + 8).
+             Hidden by default while a model is being trained; the
+             contained controls each enable themselves once a model
+             is loaded and WebGPU is the active backend. -->
+        <details id="inspectDetails" class="inspect-panel" hidden>
+          <summary>Inspect &amp; evaluate</summary>
+
+          <div class="inspect-section" id="inspectBenchmark">
+            <h4>Benchmark</h4>
+            <p class="inspect-help">Score the loaded model against a registered held-out set.</p>
+            <div class="inspect-controls">
+              <select id="benchSelect" class="secondary" disabled></select>
+              <button id="runBench" class="secondary" disabled>Run</button>
+            </div>
+            <div id="benchResult" class="sample-stats" hidden></div>
+          </div>
+
+          <div class="inspect-section" id="inspectLens">
+            <h4>Logit lens <span class="inspect-tag">interpretability</span></h4>
+            <p class="inspect-help">Per-layer predictions for the current prompt. Reveals when specific knowledge appears in the residual stream. Optionally upload a tuned-lens .lenses sidecar trained via "tinygpt tuned-lens" for calibrated probes.</p>
+            <div class="inspect-controls">
+              <button id="runLens" class="secondary" disabled>Run lens</button>
+              <label id="lensUploadLabel" class="secondary inspect-upload" title="Upload .lenses sidecar for tuned-lens projection">
+                <span>🎯 Upload .lenses</span>
+                <input id="lensUpload" type="file" accept=".lenses" style="display:none" />
+              </label>
+            </div>
+            <pre id="lensResult" class="sample-stats inspect-pre" hidden></pre>
+          </div>
+
+          <div class="inspect-section" id="inspectAblate">
+            <h4>Ablation <span class="inspect-tag">interpretability</span></h4>
+            <p class="inspect-help">Zero out one layer's attention, MLP, or whole-block contribution, then sample. Reveals how load-bearing that component is.</p>
+            <div class="inspect-controls">
+              <label class="inspect-inline">Layer <input id="ablateLayer" type="number" min="0" value="0" disabled style="width:56px" title="Layer to ablate" /></label>
+              <label class="inspect-inline">Target
+                <select id="ablateTarget" class="secondary" disabled title="Component to zero">
+                  <option value="attn">attn</option>
+                  <option value="mlp">mlp</option>
+                  <option value="all">whole layer</option>
+                </select>
+              </label>
+              <button id="runAblate" class="secondary" disabled>Ablate &amp; sample</button>
+            </div>
+            <div id="ablateResult" class="sample-stats" hidden></div>
+          </div>
+        </details>
         <div class="sample-note" id="sampleNote">
           <span id="sampleNoteContent">
             <strong>What to expect:</strong> the model has to be sized to the data.
