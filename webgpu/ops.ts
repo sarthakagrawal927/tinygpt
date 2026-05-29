@@ -29,7 +29,7 @@ const ENTRIES = [
 ] as const;
 /** Entry points that live in train_sg.wgsl and require the WebGPU
  *  `subgroups` feature on the adapter. */
-const SG_ENTRIES = ["layernorm_forward_sg", "cross_entropy_sg"] as const;
+const SG_ENTRIES = ["layernorm_forward_sg", "cross_entropy_sg", "bias_grad_sg"] as const;
 /** Entry points that live in train_vec4.wgsl — same g0-g5+p binding layout
  * from the host side, but g0/g1 are declared as array<vec4<f32>> on the
  * WGSL side for 128-bit aligned global loads. Requires K and N to be
@@ -636,10 +636,20 @@ export class GpuOps {
       Math.ceil((rows * D) / 64));
   }
 
-  /** db[d] = sum over rows of dy[row,d]. */
+  /** db[d] = sum over rows of dy[row,d].
+   *
+   *  Subgroup variant runs one workgroup per output column with 64
+   *  threads cooperating on the row sum (subgroupAdd). Big win at
+   *  Mega+ scale where N (B×T) is in the thousands — the base kernel
+   *  has each thread serially scan its column.
+   */
   biasGrad(dy: GpuTensor, rows: number, D: number): GpuTensor {
     const db = this.newTensor(D, "db");
-    this.dispatch("bias_grad", [dy, db], { a: rows, b: D }, Math.ceil(D / 64));
+    if (this.hasSubgroups) {
+      this.dispatch("bias_grad_sg", [dy, db], { a: rows, b: D }, D);
+    } else {
+      this.dispatch("bias_grad", [dy, db], { a: rows, b: D }, Math.ceil(D / 64));
+    }
     return db;
   }
 

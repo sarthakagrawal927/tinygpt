@@ -4,11 +4,16 @@
 // that lack the feature. ops.ts dispatches into this module only when
 // the device advertises the `subgroups` feature.
 //
-// Convention: one WORKGROUP per row (vs. one thread per row in train.wgsl).
-// Each workgroup uses all 64 threads to cooperatively reduce that row.
+// Convention: one WORKGROUP per row / column (vs. one thread in train.wgsl).
+// Each workgroup uses all 64 threads to cooperatively reduce that slice.
 // On big d_model (Mega / Behemoth) this turns serial 1280-element scans
 // into 20-element-per-thread scans + a single subgroupAdd — the regime
 // where this lever actually pays off.
+//
+// Entry points (each registered in ops.ts's SG_ENTRIES list):
+//   layernorm_forward_sg — row-cooperative LN (mean + variance + apply).
+//   cross_entropy_sg     — row-cooperative softmax + CE + dlogits.
+//   bias_grad_sg         — column-cooperative reduction over N rows.
 
 enable subgroups;
 
@@ -180,5 +185,52 @@ fn cross_entropy_sg(
     if (i == tgt) { onehot = 1.0; }
     g2[base + i] = (prob - onehot) * invN;
     i = i + WG;
+  }
+}
+
+// Bias-gradient (column reduction): db[d] = Σ_n dy[n, d].
+//
+// Subgroup variant: one workgroup per output column, all 64 threads
+// cooperatively sum the N rows for that column. Each thread strides
+// through the column at stride WG, accumulates locally, then a single
+// subgroupAdd folds the partial sums per subgroup and a cross-subgroup
+// reduction in shared memory produces the final value.
+//
+// Base train.wgsl runs this as one thread per column, serially scanning
+// N rows — wins as soon as N gets big enough for parallel reduction
+// throughput to dominate the per-step dispatch overhead. On Huge
+// (N = B·T = 4·256 = 1024) the SG path runs ~10-15× faster on a single
+// dispatch when the device supports subgroups.
+//
+// g0 = dy[N, D]; g1 = db[D]; p.a = N; p.b = D
+@compute @workgroup_size(WG)
+fn bias_grad_sg(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(subgroup_invocation_id) sid: u32,
+  @builtin(subgroup_size) sgSize: u32,
+) {
+  let dcol = wid.x;
+  let tid = lid.x;
+  let N = p.a;
+  let D = p.b;
+  if (dcol >= D) { return; }
+  let nSg = (WG + sgSize - 1u) / sgSize;
+  let sgId = tid / sgSize;
+
+  var localSum: f32 = 0.0;
+  var n = tid;
+  loop {
+    if (n >= N) { break; }
+    localSum = localSum + g0[n * D + dcol];
+    n = n + WG;
+  }
+  let sgSum = subgroupAdd(localSum);
+  if (sid == 0u) { sg_partial_sum[sgId] = sgSum; }
+  workgroupBarrier();
+  if (tid == 0u) {
+    var s: f32 = 0.0;
+    for (var k: u32 = 0u; k < nSg; k = k + 1u) { s = s + sg_partial_sum[k]; }
+    g1[dcol] = s;
   }
 }

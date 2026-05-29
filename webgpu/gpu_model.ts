@@ -274,6 +274,15 @@ export class GpuModel {
     return dA;
   }
 
+  /** Per-layer ablation flags. When `attnAblated[l]` is true the layer's
+   *  attention OUTPUT contribution is dropped before the residual add — the
+   *  block becomes "MLP-only" at depth l. `mlpAblated[l]` similarly drops
+   *  the MLP contribution. Both true at l = whole layer skipped (residual
+   *  passes through unchanged). Editable from JS for interpretability
+   *  probes; cleared after each `generateAblated` call. */
+  public attnAblated: boolean[] = [];
+  public mlpAblated: boolean[] = [];
+
   /** Forward pass. Returns logits and everything the backward pass needs. */
   private forward(ids: Float32Array, batch: number, T: number) {
     const { vocab: V, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
@@ -295,13 +304,20 @@ export class GpuModel {
       this.keep(att.attn); this.keep(att.ctx);
       if (att.L) this.keep(att.L);
       const ao = this.linear(att.ctx, ly.wo, ly.bo, N, C, C);
-      const r1 = this.keep(this.ops.add(blockIn, ao, N * C));
+      // Ablation: when set, the attn output is dropped (residual unchanged).
+      // We still RUN attn — cheaper than a per-step recompile, and the
+      // downstream tensors stay shape-consistent for the rest of the trace.
+      const r1 = this.attnAblated[l]
+        ? blockIn
+        : this.keep(this.ops.add(blockIn, ao, N * C));
       const ln2 = this.ops.layernormForward(r1, ly.ln2g.w, ly.ln2b.w, N, C);
       this.keep(ln2.y); this.keep(ln2.mean); this.keep(ln2.rstd);
       const hpre = this.linear(ln2.y, ly.fcInW, ly.fcInB, N, C, M);
       const hact = this.keep(this.ops.gelu(hpre, N * M));
       const mo = this.linear(hact, ly.fcOutW, ly.fcOutB, N, M, C);
-      const r2 = this.keep(this.ops.add(r1, mo, N * C));
+      const r2 = this.mlpAblated[l]
+        ? r1
+        : this.keep(this.ops.add(r1, mo, N * C));
       caches.push({
         blockIn, ln1o: ln1.y, m1: ln1.mean, r1s: ln1.rstd, q, k, v,
         attn: att.attn, ctx: att.ctx, L: att.L, r1, ln2o: ln2.y, m2: ln2.mean,
@@ -381,6 +397,33 @@ export class GpuModel {
     }
   }
 
+  /** Generate WITH per-layer ablations applied. Sets the `attnAblated` /
+   *  `mlpAblated` masks for the duration of the run, then clears them.
+   *  Used by the interpretability "ablate" tool — gives a direct
+   *  comparison of "what the model says without this layer's attention"
+   *  vs the baseline. */
+  async generateAblated(
+    promptIds: number[],
+    ablations: { layer: number; target: "attn" | "mlp" | "all" }[],
+    maxNew: number, temperature: number, topK: number, seed: number,
+    onToken?: (tok: number, idxIntoMaxNew: number) => void,
+  ): Promise<number[]> {
+    const { layers: L } = this.cfg;
+    this.attnAblated = new Array(L).fill(false);
+    this.mlpAblated = new Array(L).fill(false);
+    for (const ab of ablations) {
+      if (ab.layer < 0 || ab.layer >= L) continue;
+      if (ab.target === "attn" || ab.target === "all") this.attnAblated[ab.layer] = true;
+      if (ab.target === "mlp"  || ab.target === "all") this.mlpAblated[ab.layer]  = true;
+    }
+    try {
+      return await this.generate(promptIds, maxNew, temperature, topK, seed, onToken);
+    } finally {
+      this.attnAblated = new Array(L).fill(false);
+      this.mlpAblated = new Array(L).fill(false);
+    }
+  }
+
   /** Autoregressive generation from a prompt. temperature <= 0 is greedy.
    *  Optional `onToken` callback fires once per newly-sampled token so the
    *  caller can stream output instead of waiting for the full sequence. */
@@ -425,6 +468,100 @@ export class GpuModel {
       onToken?.(next, s);
     }
     return ids;
+  }
+
+  /**
+   * Logit lens (Nostalgebraist 2020): project each layer's residual-
+   * stream hidden state through the final layernorm + tied LM head,
+   * revealing what the model "would predict" if it stopped at that
+   * depth. The lens isn't a true prediction (the later layers always
+   * shift the distribution), but it shows when specific knowledge or
+   * structure first appears in the residual stream.
+   *
+   * Returns one `Float32Array` per layer, each shaped row-major
+   * `[T, vocab]`. Index 0 = first block's output, index L-1 = final
+   * block's output (which equals the model's real prediction).
+   *
+   * Cost: one extra LN + lm-head matmul per block. ~L× the head
+   * cost of a normal forward; still cheap for the L≤12 configs we
+   * actually run.
+   */
+  async logitLens(promptIds: number[]): Promise<Float32Array[]> {
+    const { vocab: V, ctx, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
+    if (promptIds.length === 0) return [];
+    const T = Math.min(promptIds.length, ctx);
+    const N = T;
+    const window = new Float32Array(promptIds.slice(promptIds.length - T));
+
+    this.ops.beginBatch();
+    const idsT = this.keep(this.tensorFrom(window));
+    const x0 = this.keep(
+      this.ops.embedForward(this.tokEmb.w, this.posEmb.w, idsT, N, C, T));
+    let x = x0;
+    const perLayerLogits: import("./tensor").GpuTensor[] = [];
+
+    for (let l = 0; l < L; l++) {
+      const ly = this.layers[l];
+      // Standard block forward — kept inline (vs. calling private `forward`)
+      // so we control what gets `keep`'d. The training caches aren't needed.
+      const ln1 = this.ops.layernormForward(x, ly.ln1g.w, ly.ln1b.w, N, C);
+      this.keep(ln1.y); this.keep(ln1.mean); this.keep(ln1.rstd);
+      const q = this.linear(ln1.y, ly.wq, ly.bq, N, C, C);
+      const k = this.linear(ln1.y, ly.wk, ly.bk, N, C, C);
+      const v = this.linear(ln1.y, ly.wv, ly.bv, N, C, C);
+      const att = this.ops.attentionForward(q, k, v, 1, T, C, H);
+      this.keep(att.attn); this.keep(att.ctx);
+      if (att.L) this.keep(att.L);
+      const ao = this.linear(att.ctx, ly.wo, ly.bo, N, C, C);
+      const r1 = this.keep(this.ops.add(x, ao, N * C));
+      const ln2 = this.ops.layernormForward(r1, ly.ln2g.w, ly.ln2b.w, N, C);
+      this.keep(ln2.y); this.keep(ln2.mean); this.keep(ln2.rstd);
+      const hpre = this.linear(ln2.y, ly.fcInW, ly.fcInB, N, C, M);
+      const hact = this.keep(this.ops.gelu(hpre, N * M));
+      const mo = this.linear(hact, ly.fcOutW, ly.fcOutB, N, M, C);
+      const r2 = this.keep(this.ops.add(r1, mo, N * C));
+      x = r2;
+
+      // Lens projection: re-apply final LN + tied LM head to the
+      // current depth's residual stream. The final LN's stats are
+      // computed locally (not the same as if all layers ran first)
+      // — this is the standard interpretation of "logit lens."
+      const lnfL = this.ops.layernormForward(x, this.lnfG.w, this.lnfB.w, N, C);
+      this.keep(lnfL.y); this.keep(lnfL.mean); this.keep(lnfL.rstd);
+      const logitsL = this.keep(this.ops.matmulAbt(lnfL.y, this.tokEmb.w, N, C, V));
+      perLayerLogits.push(logitsL);
+    }
+    this.ops.endBatch();
+
+    const out: Float32Array[] = [];
+    for (const lg of perLayerLogits) {
+      out.push(await lg.download());
+    }
+    this.freeScratch();
+    return out;
+  }
+
+  /**
+   * Full-sequence logits for one prompt.
+   *
+   * The benchmark runner uses this to score every position in a held-out
+   * sequence in one pass — vs the autoregressive `generate` which can
+   * only sample. Returns the entire `[T, vocab]` logits matrix row-major.
+   *
+   * Promtps are clipped to `ctx` from the LEFT (matching `generate`'s
+   * windowing) so long sequences don't OOM the attention buffer.
+   */
+  async forwardLogits(promptIds: number[]): Promise<Float32Array> {
+    const { ctx } = this.cfg;
+    if (promptIds.length === 0) return new Float32Array(0);
+    const T = Math.min(promptIds.length, ctx);
+    const window = new Float32Array(promptIds.slice(promptIds.length - T));
+    this.ops.beginBatch();
+    const fwd = this.forward(window, 1, T);
+    this.ops.endBatch();
+    const logits = await fwd.logits.download();
+    this.freeScratch();
+    return logits;
   }
 
   /**

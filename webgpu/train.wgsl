@@ -436,6 +436,14 @@ fn layernorm_dgb(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // attn = softmax(causal(q.kᵀ * scale))   g0=q g1=k g2=attn
 //
+// Algorithm (per (b, h, t1)):
+//   pass 1: score s[t2] = (q[t1] · k[t2]) * scale, for t2 <= t1 (causal mask);
+//           track max(s) along the way.
+//   pass 2: e[t2] = exp(s[t2] − max(s));   sum = Σ e[t2];   attn[t2] = e[t2] / sum.
+// Subtracting max(s) before exp is the numerical-stability trick: it keeps
+// the exp arguments ≤ 0 so the result stays in (0, 1] and never overflows.
+// The masked positions (t2 > t1) are zeroed at the end.
+//
 // Score array sized for ctx up to 1024 (Behemoth). Per-invocation private
 // memory ≈ 4 KB — well within Apple's limit. The previous fixed size of 256
 // silently broke at ctx > 256.
