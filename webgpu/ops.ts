@@ -21,7 +21,7 @@ import { BufferPool, GpuTensor, type GpuContext } from "./tensor";
 const ENTRIES = [
   "matmul", "matmul_blocked", "matmul_abt", "matmul_abt_blocked",
   "matmul_atb", "matmul_atb_blocked", "add", "bias_add",
-  "bias_grad", "gelu_forward", "gelu_backward", "layernorm_forward",
+  "bias_grad", "patch_zero", "gelu_forward", "gelu_backward", "layernorm_forward",
   "layernorm_dx", "layernorm_dgb", "attn_softmax", "attn_value", "attn_fused_sv", "attn_dscores",
   "attn_dscores_fa2", "attn_dv_fa2",
   "attn_dq", "attn_dk", "attn_dv", "embed_forward", "embed_tok_grad",
@@ -634,6 +634,16 @@ export class GpuOps {
   biasAdd(y: GpuTensor, bias: GpuTensor, rows: number, D: number): void {
     this.dispatch("bias_add", [y, bias], { a: rows, b: D },
       Math.ceil((rows * D) / 64));
+  }
+
+  /** Copy `x [N, C]` to a fresh tensor with row `row` zeroed.
+   *  Used by activation patching — the interpretability "what if this
+   *  position's representation at this layer were zero?" probe. */
+  zeroRow(x: GpuTensor, row: number, N: number, C: number): GpuTensor {
+    const out = this.newTensor(N * C, "patch.zero");
+    this.dispatch("patch_zero", [x, out], { a: N, b: row, c: C },
+                  Math.ceil((N * C) / 64));
+    return out;
   }
 
   /** db[d] = sum over rows of dy[row,d].

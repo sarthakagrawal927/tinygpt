@@ -283,6 +283,21 @@ export class GpuModel {
   public attnAblated: boolean[] = [];
   public mlpAblated: boolean[] = [];
 
+  /** Position-level patch: at layer l, position p, ZERO OUT the
+   *  block's residual stream value (replace x[p,:] with zeros for the
+   *  remainder of the forward pass). The simplest causal intervention
+   *  — pinpoints whether a specific token's representation at a
+   *  specific depth is load-bearing for the model's output.
+   *
+   *  Full donor → recipient activation patching (Meng et al., 2022)
+   *  swaps in another forward's saved hidden state instead of zeroing.
+   *  That requires a tensor-slice "replace one row" kernel — queued
+   *  behind this simpler intervention.
+   *
+   *  Each entry is consumed by `forward` and cleared after
+   *  `generatePatched` returns. */
+  public patchPositions: { layer: number; position: number }[] = [];
+
   /** Forward pass. Returns logits and everything the backward pass needs. */
   private forward(ids: Float32Array, batch: number, T: number) {
     const { vocab: V, layers: L, heads: H, dModel: C, dMlp: M } = this.cfg;
@@ -315,9 +330,18 @@ export class GpuModel {
       const hpre = this.linear(ln2.y, ly.fcInW, ly.fcInB, N, C, M);
       const hact = this.keep(this.ops.gelu(hpre, N * M));
       const mo = this.linear(hact, ly.fcOutW, ly.fcOutB, N, M, C);
-      const r2 = this.mlpAblated[l]
+      var r2 = this.mlpAblated[l]
         ? r1
         : this.keep(this.ops.add(r1, mo, N * C));
+      // Position-zero patch: at the specified (layer, position),
+      // replace the block's residual-stream output with zeros for that
+      // single position. Pure causal intervention — exposes whether
+      // that token's representation at this depth is load-bearing.
+      for (const patch of this.patchPositions) {
+        if (patch.layer !== l) continue;
+        if (patch.position < 0 || patch.position >= T) continue;
+        r2 = this.keep(this.ops.zeroRow(r2, patch.position, T, C));
+      }
       caches.push({
         blockIn, ln1o: ln1.y, m1: ln1.mean, r1s: ln1.rstd, q, k, v,
         attn: att.attn, ctx: att.ctx, L: att.L, r1, ln2o: ln2.y, m2: ln2.mean,
@@ -394,6 +418,27 @@ export class GpuModel {
       p.w.upload(new Float32Array(f32.buffer, f32.byteOffset + off * 4, p.size)); off += p.size;
       p.m.upload(new Float32Array(f32.buffer, f32.byteOffset + off * 4, p.size)); off += p.size;
       p.v.upload(new Float32Array(f32.buffer, f32.byteOffset + off * 4, p.size)); off += p.size;
+    }
+  }
+
+  /** Generate WITH per-(layer, position) zero-patches applied.
+   *  Phase-8 activation patching, simplest variant: the residual
+   *  stream at the specified (layer, position) is zeroed AFTER that
+   *  layer's MLP add, before the next layer's input. The model's
+   *  output reveals how load-bearing that token's representation
+   *  was at that depth. Full donor → recipient swap (Meng et al.,
+   *  2022) is the next iteration. */
+  async generatePatched(
+    promptIds: number[],
+    patches: { layer: number; position: number }[],
+    maxNew: number, temperature: number, topK: number, seed: number,
+    onToken?: (tok: number, idxIntoMaxNew: number) => void,
+  ): Promise<number[]> {
+    this.patchPositions = patches.slice();
+    try {
+      return await this.generate(promptIds, maxNew, temperature, topK, seed, onToken);
+    } finally {
+      this.patchPositions = [];
     }
   }
 

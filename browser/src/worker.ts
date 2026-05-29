@@ -70,6 +70,9 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case "ablate":
       void doAblate(msg.prompt, msg.tokens, msg.temperature, msg.ablations);
       break;
+    case "patch":
+      void doPatch(msg.prompt, msg.tokens, msg.temperature, msg.patches);
+      break;
   }
 };
 
@@ -692,6 +695,35 @@ async function doAblate(
     });
   } catch (err) {
     post({ type: "ablate_failed", message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * Activation-patching generator. Replays sampling with the residual
+ * stream zeroed at the specified (layer, position) tuples. WebGPU
+ * only — the WASM model doesn't expose the per-block forward hooks.
+ */
+async function doPatch(
+  prompt: string, tokens: number, temperature: number,
+  patches: { layer: number; position: number }[],
+): Promise<void> {
+  if (!gpuModel) {
+    post({ type: "patch_failed", message: "Activation patching requires the WebGPU backend." });
+    return;
+  }
+  try {
+    const seed = (Date.now() & 0xffff) >>> 0;
+    const promptIds = [...encode(prompt)];
+    const out = await gpuModel.generatePatched(
+      promptIds, patches, tokens, temperature, 40, seed,
+    );
+    post({
+      type: "patch_done",
+      text: prompt + decode(Uint8Array.from(out.slice(promptIds.length))),
+      patches: patches.map((p) => ({ layer: p.layer, position: p.position })),
+    });
+  } catch (err) {
+    post({ type: "patch_failed", message: err instanceof Error ? err.message : String(err) });
   }
 }
 

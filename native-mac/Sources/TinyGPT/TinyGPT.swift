@@ -46,6 +46,8 @@ struct TinyGPT {
             ES.run(args: Array(args.dropFirst()))
         case "laser":
             LASER.run(args: Array(args.dropFirst()))
+        case "hqq":
+            HQQ.run(args: Array(args.dropFirst()))
         case "compare":
             Compare.run(args: Array(args.dropFirst()))
         case "hf-inspect":

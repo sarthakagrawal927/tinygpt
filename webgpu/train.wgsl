@@ -318,6 +318,21 @@ fn bias_add(@builtin(global_invocation_id) gid: vec3<u32>) {
   g0[i] = g0[i] + g1[i % p.b];
 }
 
+// Activation patching: copy x[N, C] → out[N, C] with one ROW zeroed.
+// Used by the interpretability "zero out this token's representation
+// at this layer" intervention. NOT in-place — preserves the caller's
+// `x` for any other downstream consumer in the same forward pass.
+// g0=x[N,C] g1=out[N,C]   p.a=N (total rows) p.b=row-to-zero p.c=C (cols)
+@compute @workgroup_size(64)
+fn patch_zero(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let total = p.a * p.c;
+  if (idx >= total) { return; }
+  let row = idx / p.c;
+  // Zero the entire row at p.b; pass-through everything else.
+  g1[idx] = select(g0[idx], 0.0, row == p.b);
+}
+
 // db[d] = sum over rows of dy[row,d]   g0=dy[rows,D] g1=db[D]   p.a=rows p.b=D
 @compute @workgroup_size(64)
 fn bias_grad(@builtin(global_invocation_id) gid: vec3<u32>) {

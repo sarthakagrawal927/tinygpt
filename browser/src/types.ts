@@ -81,6 +81,15 @@ export type ToWorker =
   | {
       type: "ablate"; prompt: string; tokens: number; temperature: number;
       ablations: { layer: number; target: "attn" | "mlp" | "all" }[];
+    }
+  // Activation patching — re-runs generation with the residual stream
+  // ZEROED at the specified (layer, position) coordinates. The output
+  // reveals how load-bearing that token's representation was at that
+  // depth. Simplest causal intervention; donor → recipient swap is
+  // the follow-up.
+  | {
+      type: "patch"; prompt: string; tokens: number; temperature: number;
+      patches: { layer: number; position: number }[];
     };
 
 /** Logit-lens output: one layer-slot per transformer block. Each slot
@@ -148,4 +157,6 @@ export type FromWorker =
   // (token, prob) predictions per input position. nLayers = entries.length.
   | { type: "lens"; result: LensResult }
   | { type: "ablate_done"; text: string; ablations: { layer: number; target: string }[] }
-  | { type: "ablate_failed"; message: string };
+  | { type: "ablate_failed"; message: string }
+  | { type: "patch_done"; text: string; patches: { layer: number; position: number }[] }
+  | { type: "patch_failed"; message: string };
