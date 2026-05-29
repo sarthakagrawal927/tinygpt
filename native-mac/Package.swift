@@ -18,6 +18,7 @@ let package = Package(
     products: [
         .library(name: "TinyGPTIO", targets: ["TinyGPTIO"]),
         .library(name: "TinyGPTModel", targets: ["TinyGPTModel"]),
+        .library(name: "TinyGPTBench", targets: ["TinyGPTBench"]),
         .executable(name: "tinygpt", targets: ["TinyGPT"]),
         .executable(name: "TinyGPTApp", targets: ["TinyGPTApp"]),
     ],
@@ -48,11 +49,22 @@ let package = Package(
                 .product(name: "Hub", package: "swift-transformers"),
             ]
         ),
+        .target(
+            name: "TinyGPTBench",
+            dependencies: [
+                "TinyGPTIO",
+                "TinyGPTModel",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXRandom", package: "mlx-swift"),
+            ]
+        ),
         .executableTarget(
             name: "TinyGPT",
             dependencies: [
                 "TinyGPTIO",
                 "TinyGPTModel",
+                "TinyGPTBench",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),

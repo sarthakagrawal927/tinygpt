@@ -1,5 +1,6 @@
 import Foundation
 import TinyGPTIO
+import TinyGPTBench
 
 /// CLI entry point. Mirrors `python_ref/load_tinygpt.py --inspect`.
 /// Subcommands:
@@ -29,6 +30,13 @@ struct TinyGPT {
             }
             run { try validate(path: path) }
         case "bench":
+            // Inference-side LLM benchmark harness (Bench360-modelled).
+            // See docs/benchmark_harness_design.md.
+            Benchmark.run(args: Array(args.dropFirst()))
+        case "bench-train":
+            // Legacy training-throughput benchmark vs the WebGPU browser
+            // baseline. Used to be `tinygpt bench` before the inference
+            // harness shipped — preserved under a new name.
             Bench.run(args: Array(args.dropFirst()))
         case "train":
             Train.run(args: Array(args.dropFirst()))
@@ -95,10 +103,12 @@ struct TinyGPT {
         usage:
           tinygpt inspect <path>     print manifest + metadata for a .tinygpt file
           tinygpt validate <path>    round-trip check: read → encode → byte-compare
-          tinygpt bench [flags]      training-throughput benchmark vs. WebGPU baseline
+          tinygpt bench [flags]      inference-side LLM benchmark harness (Bench360-modelled)
+          tinygpt bench-train [flags] training-throughput benchmark vs. WebGPU baseline
 
         file format documented in Sources/TinyGPTIO/TinyGPTFile.swift.
         bench flags documented in `tinygpt bench --help`.
+        bench harness design documented in docs/benchmark_harness_design.md.
         """)
     }
 
