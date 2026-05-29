@@ -19,12 +19,6 @@ final class TrainController: ObservableObject {
     @Published var sampleText: String = ""
     @Published var presetIdx: Int = 0  // index into Self.presets
 
-    struct LossPoint: Identifiable {
-        let id = UUID()
-        let step: Int
-        let loss: Float
-    }
-
     /// Picks the user can choose between. Each is a (name, config) pair.
     /// Browser-reachable sizes at the top; Mac-only behemoth sizes below.
     static let presets: [(name: String, cfg: ModelConfig)] = [

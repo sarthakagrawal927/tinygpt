@@ -1,9 +1,29 @@
 import SwiftUI
 
+/// One sample of the loss curve. Shared by both the train and fine-tune
+/// tabs so the chart can render either.
+struct LossPoint: Identifiable {
+    let id = UUID()
+    let step: Int
+    let loss: Float
+}
+
 /// A live, low-chrome loss chart. Renders via Canvas for tight control over
 /// the look — matches the browser playground's mint-line chart.
 struct LossChart: View {
-    let points: [TrainController.LossPoint]
+    let points: [LossPoint]
+
+    /// Convenience init that takes `(step, loss)` tuples — useful for
+    /// callers building points inline from arbitrary state.
+    init(points: [LossPoint], targetSteps: Int) {
+        self.points = points
+        self.targetSteps = targetSteps
+    }
+    init(points: [Point], targetSteps: Int) {
+        self.points = points.map { LossPoint(step: $0.step, loss: $0.loss) }
+        self.targetSteps = targetSteps
+    }
+    struct Point { let step: Int; let loss: Float }
     /// The expected upper-bound step so the curve grows leftward as training
     /// progresses, instead of squishing into the left edge.
     let targetSteps: Int
