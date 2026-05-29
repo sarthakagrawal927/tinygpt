@@ -66,7 +66,34 @@ export type ToWorker =
   // buffers after N minutes of inactivity. No-op when no model is loaded
   // or when training is in flight. Worker replies with "model_offloaded"
   // when teardown completes (or omits the reply if nothing to free).
-  | { type: "offload" };
+  | { type: "offload" }
+  // Benchmark runner — main thread asks worker to score the loaded model
+  // against a registered benchmark (see `benchmarks/registry.ts`). Worker
+  // adapts its model handle to the BenchmarkModel interface and runs it.
+  | { type: "benchmark"; id: string }
+  // Logit lens — interpretability tool. Worker runs forward over `prompt`
+  // and returns per-layer top-K predictions (what the model "would say"
+  // if it stopped at each depth).
+  | { type: "lens"; prompt: Uint8Array; topK: number }
+  // Ablation tool — re-runs generation with specified components zeroed
+  // out, returning the resulting text. Used to study "what does this
+  // layer's attention contribute?" or "is this block load-bearing?".
+  | {
+      type: "ablate"; prompt: string; tokens: number; temperature: number;
+      ablations: { layer: number; target: "attn" | "mlp" | "all" }[];
+    };
+
+/** Logit-lens output: one layer-slot per transformer block. Each slot
+ * has the top-K (token, prob) predictions at every input position,
+ * the projection of THAT layer's residual stream through the LM head.
+ * Useful for "when does the model learn X?" interpretability studies. */
+export interface LensResult {
+  tokens: number[];
+  /** Per-layer: per-position top-K (token, prob), descending. */
+  layers: { token: number; prob: number }[][][];
+  /** Set when the active backend can't produce a lens (WASM today). */
+  unavailable?: string;
+}
 
 /** Per-position introspection payload (one entry per token in the inspect prompt). */
 export interface InspectResult {
@@ -109,4 +136,16 @@ export type FromWorker =
   // Fires when the worker has destroyed its loaded model (auto-offload).
   // Main thread hides the GPU-mem pill + disables Generate + shows a small
   // "model freed after idle" toast with a "reload" affordance.
-  | { type: "model_offloaded" };
+  | { type: "model_offloaded" }
+  // Result of a "benchmark" request. `score` is the benchmark's primary
+  // ranking metric; interpret against the benchmark's `lowerIsBetter`.
+  // `kind: "incompatible"` covers vocab/architecture mismatch (skip,
+  // don't penalize); `kind: "failed"` is a real failure (show red).
+  | { type: "benchmark_done"; id: string; score: number; details?: Record<string, unknown>; wallSeconds: number }
+  | { type: "benchmark_skipped"; id: string; reason: string }
+  | { type: "benchmark_failed"; id: string; message: string }
+  // Logit lens result. One entry per layer; each entry has the top-K
+  // (token, prob) predictions per input position. nLayers = entries.length.
+  | { type: "lens"; result: LensResult }
+  | { type: "ablate_done"; text: string; ablations: { layer: number; target: string }[] }
+  | { type: "ablate_failed"; message: string };

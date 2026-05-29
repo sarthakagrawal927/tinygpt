@@ -3303,12 +3303,33 @@ const pageBody = `
             <input id="genTokens" type="number" value="300" min="16" max="512" />
           </div>
           <button id="sample" class="secondary" disabled>Generate</button>
+          <!-- Phase-1 benchmark runner. Hidden until a model is loaded and
+               the WebGPU backend is active (forwardLogits is WebGPU-only). -->
+          <select id="benchSelect" class="secondary" disabled hidden style="margin-left:6px"></select>
+          <button id="runBench" class="secondary" disabled hidden>Run benchmark</button>
+          <!-- Phase 8 interpretability: logit lens. Shows what each layer
+               "would predict" if it stopped there — a window into when
+               specific knowledge first appears in the residual stream. -->
+          <button id="runLens" class="secondary" disabled hidden style="margin-left:6px">Logit lens</button>
+          <!-- Per-layer ablation: zero out a chosen component at a chosen
+               layer, then sample. The result reveals how load-bearing that
+               component is to the model's behaviour. -->
+          <input id="ablateLayer" type="number" min="0" value="0" disabled hidden style="width:48px;margin-left:6px" title="Layer to ablate" />
+          <select id="ablateTarget" class="secondary" disabled hidden title="Component to zero">
+            <option value="attn">attn</option>
+            <option value="mlp">mlp</option>
+            <option value="all">whole layer</option>
+          </select>
+          <button id="runAblate" class="secondary" disabled hidden>Ablate &amp; sample</button>
         </div>
+        <div id="ablateResult" class="sample-stats" hidden></div>
         <div class="sample-output-wrap">
           <div id="output" class="empty">Train a model, then generate text here.</div>
           <button id="copyOutput" class="copy-output" type="button" title="Copy generated text" hidden aria-label="Copy generated text">⧉</button>
         </div>
         <div id="sampleStats" class="sample-stats" hidden></div>
+        <div id="benchResult" class="sample-stats" hidden></div>
+        <pre id="lensResult" class="sample-stats" hidden style="overflow:auto;font-size:11px;max-height:400px"></pre>
         <div class="sample-note" id="sampleNote">
           <span id="sampleNoteContent">
             <strong>What to expect:</strong> the model has to be sized to the data.

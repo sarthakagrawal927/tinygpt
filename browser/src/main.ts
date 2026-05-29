@@ -32,6 +32,7 @@ import {
 import { loadCachedGalleryModel, loadRun, loadState, requestDurableStorage, saveCachedGalleryModel, saveRun, saveState } from "./storage";
 import { hasSeenTour, markTourSeen, startTour } from "./tour";
 import { DEFAULT_CONFIG, type FromWorker, type InspectResult, type RunConfig, type ToWorker } from "./types";
+import { benchmarks as registeredBenchmarks } from "./benchmarks/registry";
 import {
   initAnalytics,
   installBrowserMonitoring,
@@ -61,6 +62,18 @@ const els = {
   stBackend: byId<HTMLElement>("stBackend"),
   bench: byId<HTMLButtonElement>("bench"),
   benchOut: byId<HTMLDivElement>("benchOut"),
+  // Model-benchmark trio: select which benchmark, the Run button, and
+  // the result line under the Sample output. WebGPU-only (the worker
+  // route requires `forwardLogits` which the WASM backend doesn't ship).
+  benchSelect: byId<HTMLSelectElement>("benchSelect"),
+  runBench: byId<HTMLButtonElement>("runBench"),
+  benchResult: byId<HTMLDivElement>("benchResult"),
+  runLens: byId<HTMLButtonElement>("runLens"),
+  lensResult: byId<HTMLPreElement>("lensResult"),
+  ablateLayer: byId<HTMLInputElement>("ablateLayer"),
+  ablateTarget: byId<HTMLSelectElement>("ablateTarget"),
+  runAblate: byId<HTMLButtonElement>("runAblate"),
+  ablateResult: byId<HTMLDivElement>("ablateResult"),
   hfDataset: byId<HTMLSelectElement>("hfDataset"),
   hfStatus: byId<HTMLSpanElement>("hfStatus"),
   hfCustom: byId<HTMLDivElement>("hfCustom"),
@@ -213,6 +226,23 @@ let milestonesHit = new Set<string>();
 let elapsedTimer: number | undefined;
 
 const LN_256 = Math.log(256); // 5.545 — the random-baseline loss
+/**
+ * `?autoSave=<name>` — when set, the app programmatically fires the same
+ * download that the "Download model" button does, the moment training
+ * completes (case "done" with reason "finished"). Filename is
+ * `<name>.tinygpt`. Designed for headless training pipelines
+ * (`browser/train_gallery_one.mjs`): the script just listens for the
+ * browser's download event instead of clicking a button — so the
+ * checkpoint persists even if downstream UI steps (sample generation,
+ * etc.) crash or time out.
+ */
+const autoSaveFilename: string | null = (() => {
+  try {
+    const v = new URLSearchParams(window.location.search).get("autoSave");
+    return v ? `${v}.tinygpt` : null;
+  } catch { return null; }
+})();
+
 let firstRunCelebrated = (() => {
   try { return localStorage.getItem("tinygpt.firstRunCelebrated") === "1"; } catch { return false; }
 })();
@@ -886,6 +916,116 @@ function finalizeSampleAnalytics(text: string): void {
   });
   lastSampleRequest = null;
 }
+
+/// Show or hide the model-benchmark controls. Mirrors the Generate
+/// button's availability — whenever a model is loaded and we can run
+/// inference, the bench select + Run button become accessible. The
+/// worker will gracefully skip with a reason if the active backend
+/// can't service `forwardLogits` (currently WASM).
+function setBenchAvailable(enabled: boolean): void {
+  els.benchSelect.hidden = !enabled;
+  els.runBench.hidden = !enabled;
+  els.benchSelect.disabled = !enabled;
+  els.runBench.disabled = !enabled;
+  if (!enabled) els.benchResult.hidden = true;
+  // Logit lens shares the "model loaded" gate. Worker emits an
+  // `unavailable` payload when the backend can't service it (WASM today).
+  els.runLens.hidden = !enabled;
+  els.runLens.disabled = !enabled;
+  if (!enabled) els.lensResult.hidden = true;
+  // Per-layer ablation controls share the same gate.
+  els.ablateLayer.hidden = !enabled;
+  els.ablateLayer.disabled = !enabled;
+  els.ablateTarget.hidden = !enabled;
+  els.ablateTarget.disabled = !enabled;
+  els.runAblate.hidden = !enabled;
+  els.runAblate.disabled = !enabled;
+  if (!enabled) els.ablateResult.hidden = true;
+}
+
+/// Render a logit-lens result as a compact text table: rows = layers,
+/// columns = input positions, each cell = top-1 predicted token. ASCII
+/// byte tokens render directly; non-printable bytes show as `<NN>`.
+function renderLens(result: import("./types").LensResult): void {
+  els.lensResult.hidden = false;
+  if (result.unavailable) {
+    els.lensResult.textContent = result.unavailable;
+    return;
+  }
+  const tokens = result.tokens;
+  // Header — input bytes themselves, two-char-wide cells.
+  const cell = (b: number): string => {
+    if (b >= 0x20 && b <= 0x7e) return String.fromCharCode(b).padEnd(2);
+    return `<${b.toString(16).padStart(2, "0").toUpperCase()}>`.slice(0, 4).padEnd(2);
+  };
+  const lines: string[] = [];
+  lines.push("input: " + tokens.map(cell).join(" "));
+  // One row per layer (deepest at the bottom), showing top-1 byte.
+  result.layers.forEach((perPos, layerIdx) => {
+    const row = perPos.map((tk) => cell(tk[0]?.token ?? 0)).join(" ");
+    lines.push(`L${String(layerIdx).padStart(2, "0")}:   ${row}`);
+  });
+  lines.push("");
+  lines.push("(top-1 token predicted at each layer · position. Top layer ≈ real output.)");
+  els.lensResult.textContent = lines.join("\n");
+}
+
+/// Populate the benchmark dropdown from the registry (called once at
+/// startup). Each <option> carries the benchmark id + a hint of the
+/// expected wall-clock so the user knows what they're committing to.
+function populateBenchmarkOptions(): void {
+  els.benchSelect.innerHTML = "";
+  for (const b of registeredBenchmarks) {
+    const opt = document.createElement("option");
+    opt.value = b.id;
+    opt.textContent = `${b.name} (~${b.approxSeconds}s)`;
+    opt.title = b.description;
+    els.benchSelect.appendChild(opt);
+  }
+}
+populateBenchmarkOptions();
+
+els.runBench.addEventListener("click", () => {
+  if (els.runBench.disabled) return;
+  const id = els.benchSelect.value || registeredBenchmarks[0]?.id;
+  if (!id) return;
+  els.runBench.disabled = true;
+  els.runBench.textContent = "running…";
+  els.benchResult.hidden = false;
+  els.benchResult.textContent = `${id}: running…`;
+  send({ type: "benchmark", id });
+});
+
+els.runLens.addEventListener("click", () => {
+  if (els.runLens.disabled) return;
+  // Use the prompt the user has in the box. If no model has produced
+  // a sample yet, the lens still works against the prompt bytes alone.
+  const promptVal = byId<HTMLInputElement>("prompt").value || "ROMEO:";
+  const promptBytes = new TextEncoder().encode(promptVal);
+  els.runLens.disabled = true;
+  els.runLens.textContent = "running lens…";
+  els.lensResult.hidden = false;
+  els.lensResult.textContent = "computing per-layer predictions…";
+  send({ type: "lens", prompt: promptBytes, topK: 1 });
+});
+
+els.runAblate.addEventListener("click", () => {
+  if (els.runAblate.disabled) return;
+  const layer = parseInt(els.ablateLayer.value, 10);
+  const target = els.ablateTarget.value as "attn" | "mlp" | "all";
+  if (!Number.isFinite(layer) || layer < 0) return;
+  const promptVal = byId<HTMLInputElement>("prompt").value || "ROMEO:";
+  const tokens = parseInt(byId<HTMLInputElement>("genTokens").value, 10) || 64;
+  const temperature = parseFloat(byId<HTMLInputElement>("temp").value) || 0.8;
+  els.runAblate.disabled = true;
+  els.runAblate.textContent = "ablating…";
+  els.ablateResult.hidden = false;
+  els.ablateResult.textContent = `sampling with layer ${layer} ${target} zeroed…`;
+  send({
+    type: "ablate", prompt: promptVal, tokens, temperature,
+    ablations: [{ layer, target }],
+  });
+});
 
 els.sample.addEventListener("click", () => {
   // Guard against double-click stacking two concurrent generations in the
@@ -2387,6 +2527,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       break;
     case "restored":
       els.sample.disabled = false;
+      setBenchAvailable(true);
       // A restored model lives in the worker — the Watch screen is now valid.
       (window as unknown as { __tgEnableWatch?: () => void }).__tgEnableWatch?.();
       break;
@@ -2424,7 +2565,54 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       latestStateConfig = null;
       setGpuMemPill(null);
       els.sample.disabled = true;
+      setBenchAvailable(false);
       setStatus("model freed after idle · re-load from gallery to use again");
+      break;
+    case "benchmark_done": {
+      const fmtScore = msg.score >= 100 || msg.score < 0.01
+        ? msg.score.toExponential(2) : msg.score.toFixed(3);
+      els.benchResult.hidden = false;
+      els.benchResult.innerHTML =
+        `<span class="stat-pair"><strong>${fmtScore}</strong><span class="unit">${msg.id} score</span></span>` +
+        `<span class="stat-pair"><strong>${msg.wallSeconds.toFixed(1)}</strong><span class="unit">s</span></span>`;
+      els.runBench.disabled = false;
+      els.runBench.textContent = "Run benchmark";
+      break;
+    }
+    case "benchmark_skipped":
+      els.benchResult.hidden = false;
+      els.benchResult.textContent = `${msg.id} skipped: ${msg.reason}`;
+      els.runBench.disabled = false;
+      els.runBench.textContent = "Run benchmark";
+      break;
+    case "benchmark_failed":
+      els.benchResult.hidden = false;
+      els.benchResult.textContent = `${msg.id} failed: ${msg.message}`;
+      els.runBench.disabled = false;
+      els.runBench.textContent = "Run benchmark";
+      break;
+    case "lens":
+      renderLens(msg.result);
+      els.runLens.disabled = false;
+      els.runLens.textContent = "Logit lens";
+      break;
+    case "ablate_done": {
+      const tags = msg.ablations.map((a) => `L${a.layer}.${a.target}`).join(", ");
+      els.ablateResult.hidden = false;
+      els.ablateResult.innerHTML =
+        `<div style="margin-bottom:4px"><strong>ablated [${tags}]</strong></div>` +
+        `<div style="white-space:pre-wrap;font-family:monospace">${
+          msg.text.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!))
+        }</div>`;
+      els.runAblate.disabled = false;
+      els.runAblate.textContent = "Ablate & sample";
+      break;
+    }
+    case "ablate_failed":
+      els.ablateResult.hidden = false;
+      els.ablateResult.textContent = `ablate failed: ${msg.message}`;
+      els.runAblate.disabled = false;
+      els.runAblate.textContent = "Ablate & sample";
       break;
     case "done": {
       setRunning(false);
@@ -2438,6 +2626,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       // both training and the post-training inference-pipeline warmup, so
       // the first click won't pay the 10–30s WGSL compile cost.
       els.sample.disabled = false;
+      setBenchAvailable(true);
       const totalSec = (performance.now() - runStartTime) / 1000;
       const elapsedStr = formatElapsed(totalSec);
       els.stElapsed.textContent = elapsedStr;
@@ -2469,6 +2658,20 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
               : "training complete (WebGPU run — not checkpointed)";
         setStatus(doneMsg);
         if (msg.reason === "finished") fireDoneNotification(doneMsg);
+      }
+      // Auto-save trigger: when ?autoSave=<name> is set, fire the same
+      // download the button does, the moment training finishes. The
+      // critical artifact (the .tinygpt checkpoint) is now persisted
+      // before ANY subsequent UI step runs, so a failure in sample
+      // generation or anywhere else can't lose the training output.
+      if (msg.reason === "finished" && autoSaveFilename && latestState && latestStateConfig) {
+        try {
+          const blob = encodeModelFile(latestStateConfig, latestState);
+          triggerDownload(blob, autoSaveFilename);
+          setModelStatus(`✓ auto-saved ${autoSaveFilename} (${(blob.size / 1024).toFixed(0)} KB)`, "ok");
+        } catch (err) {
+          setModelStatus(`auto-save failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
       }
       break;
     }
@@ -3260,6 +3463,35 @@ interface GalleryModel {
    *  value when this card loads so the first Generate click produces
    *  format-consistent output. */
   prompt?: string;
+  /** Total wall-clock time for the original training run, milliseconds.
+   *  Used by the leaderboard's "score per compute" pareto view to reward
+   *  efficient submissions over brute-force ones. */
+  trainWallMs?: number;
+  /** Submission metadata. Curated gallery cards have author = "TinyGPT"
+   *  + featured = true. Community submissions arrive with author set to
+   *  the submitter's handle and featured = false until promoted. */
+  submission?: {
+    author?: string;
+    submittedAt?: string;
+    /** True when training ran inside a browser tab (the project's
+     *  defining constraint). Set by `train_gallery_one.mjs` and by the
+     *  in-browser submission flow; false for Mac-trained submissions. */
+    browserTrained?: boolean;
+    /** Whether this entry appears in the curated Gallery sidebar.
+     *  Leaderboard always sees every entry; gallery is a filtered
+     *  subset. */
+    featured?: boolean;
+    /** Optional public URL the submitter pointed at when uploading
+     *  (e.g., a tweet, blog post, repo) — surfaces as "see source" in
+     *  the leaderboard row. */
+    sourceUrl?: string;
+  };
+  /** Benchmark scores keyed by benchmark id (see
+   *  `browser/src/benchmarks/`). A `null` means the benchmark was
+   *  evaluated but the model was incompatible (e.g., wrong vocab); an
+   *  absent key means it was never run. The leaderboard view groups
+   *  entries by benchmark and ranks within each group. */
+  benchmarks?: Record<string, number | null>;
 }
 interface GalleryManifest {
   version: number;

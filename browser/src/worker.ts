@@ -18,6 +18,8 @@ import { createGpuContext, type GpuContext } from "../../webgpu/tensor";
 import { TinyGptBackend, TinyGptModel } from "./backend";
 import { decode, encode } from "./tokenizer";
 import type { FromWorker, RunConfig, ToWorker } from "./types";
+import { benchmarkById } from "./benchmarks/registry";
+import { BenchmarkError, type BenchmarkModel } from "./benchmarks/types";
 
 const ctx = self as unknown as {
   postMessage(msg: FromWorker, transfer?: Transferable[]): void;
@@ -63,6 +65,11 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case "restore": void doRestore(msg.state, msg.config); break;
     case "inspect": void doInspect(msg.prompt, msg.topK); break;
     case "offload": offloadModel(); break;
+    case "benchmark": void doBenchmark(msg.id); break;
+    case "lens": void doLens(msg.prompt, msg.topK); break;
+    case "ablate":
+      void doAblate(msg.prompt, msg.tokens, msg.temperature, msg.ablations);
+      break;
   }
 };
 
@@ -592,5 +599,156 @@ async function doRestore(state: ArrayBuffer, cfg: RunConfig): Promise<void> {
     });
   } catch (err) {
     post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * Benchmark runner — adapts the currently-loaded model to the
+ * `BenchmarkModel` interface (encode/decode + forwardLogits/generate)
+ * and invokes the requested benchmark.
+ *
+ * WebGPU-only for the first cut. WASM-backed models don't currently
+ * expose a full `forwardLogits` (no `tg_forward_logits` export yet),
+ * so we return `benchmark_skipped` with a clear reason so the UI can
+ * point users to the WebGPU backend instead of failing red.
+ */
+/**
+ * Logit lens — per-layer top-K predictions. Pure WebGPU today (the
+ * WASM model doesn't expose per-layer hidden states). When called
+ * with a WASM-only model we emit an `unavailable` payload so the UI
+ * shows a friendly note instead of failing red.
+ */
+async function doLens(prompt: Uint8Array, topK: number): Promise<void> {
+  if (!gpuModel) {
+    post({
+      type: "lens",
+      result: {
+        tokens: [...prompt],
+        layers: [],
+        unavailable: model
+          ? "Logit lens requires the WebGPU backend — switch backends and reload."
+          : "Train or load a model first.",
+      },
+    });
+    return;
+  }
+  try {
+    const perLayer = await gpuModel.logitLens([...prompt]);
+    const tokens = [...prompt];
+    const V = gpuModel.cfg.vocab;
+    // For each layer, softmax + top-K per input position.
+    const layers: { token: number; prob: number }[][][] = [];
+    for (const logits of perLayer) {
+      const T = tokens.length;
+      const perPos: { token: number; prob: number }[][] = [];
+      for (let t = 0; t < T; t++) {
+        const base = t * V;
+        let mx = -1e30;
+        for (let v = 0; v < V; v++) if (logits[base + v] > mx) mx = logits[base + v];
+        const probs = new Float64Array(V);
+        let sum = 0;
+        for (let v = 0; v < V; v++) {
+          const p = Math.exp(logits[base + v] - mx);
+          probs[v] = p; sum += p;
+        }
+        for (let v = 0; v < V; v++) probs[v] /= sum;
+        const indexed = Array.from(probs, (p, v) => ({ token: v, prob: p }));
+        indexed.sort((a, b) => b.prob - a.prob);
+        perPos.push(indexed.slice(0, topK));
+      }
+      layers.push(perPos);
+    }
+    post({ type: "lens", result: { tokens, layers } });
+  } catch (err) {
+    post({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * Ablation generator — re-runs sampling with specific layer
+ * components zeroed out. Sets GpuModel's ablation flags, generates,
+ * then clears the flags so subsequent normal samples are uncorrupted.
+ */
+async function doAblate(
+  prompt: string,
+  tokens: number,
+  temperature: number,
+  ablations: { layer: number; target: "attn" | "mlp" | "all" }[],
+): Promise<void> {
+  if (!gpuModel) {
+    post({ type: "ablate_failed", message: "Ablation requires the WebGPU backend." });
+    return;
+  }
+  try {
+    const seed = (Date.now() & 0xffff) >>> 0;
+    const promptIds = [...encode(prompt)];
+    const out = await gpuModel.generateAblated(
+      promptIds, ablations, tokens, temperature, 40, seed,
+    );
+    post({
+      type: "ablate_done",
+      text: prompt + decode(Uint8Array.from(out.slice(promptIds.length))),
+      ablations: ablations.map((a) => ({ layer: a.layer, target: a.target })),
+    });
+  } catch (err) {
+    post({ type: "ablate_failed", message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function doBenchmark(id: string): Promise<void> {
+  const bench = benchmarkById(id);
+  if (!bench) {
+    post({ type: "benchmark_failed", id, message: `no benchmark with id '${id}'` });
+    return;
+  }
+  if (!gpuModel) {
+    post({
+      type: "benchmark_skipped", id,
+      reason: model
+        ? "WASM backend doesn't expose forwardLogits yet — switch to WebGPU and re-load the model."
+        : "no model loaded — train or load a gallery model first.",
+    });
+    return;
+  }
+
+  // Build the adapter. The browser is byte-level today; encode/decode go
+  // through the shared tokenizer. forwardLogits / generate route to the
+  // GpuModel paths added for this and existing for sample respectively.
+  const gm = gpuModel;
+  const adapter: BenchmarkModel = {
+    vocabSize: gm.cfg.vocab,
+    contextLength: gm.cfg.ctx,
+    encode: (text) => [...encode(text)],
+    decode: (ids) => decode(Uint8Array.from(ids)),
+    forwardLogits: (ids) => gm.forwardLogits(ids),
+    generate: async (prompt, maxNew, temperature) => {
+      const promptIds = [...encode(prompt)];
+      const seed = (Date.now() & 0xffff) >>> 0;
+      const out = await gm.generate(promptIds, maxNew, temperature, 40, seed);
+      return decode(Uint8Array.from(out));
+    },
+  };
+
+  const t0 = performance.now();
+  try {
+    const result = await bench.run(adapter);
+    const wallSeconds = result.wallSeconds ?? (performance.now() - t0) / 1000;
+    post({
+      type: "benchmark_done", id, score: result.score,
+      details: result.details, wallSeconds,
+    });
+  } catch (err) {
+    if (err instanceof BenchmarkError) {
+      if (err.kind === "incompatible") {
+        post({ type: "benchmark_skipped", id, reason: err.message });
+      } else {
+        post({ type: "benchmark_failed", id, message: err.message });
+      }
+      return;
+    }
+    post({
+      type: "benchmark_failed", id,
+      message: err instanceof Error ? err.message : String(err),
+    });
   }
 }

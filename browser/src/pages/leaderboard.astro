@@ -1,0 +1,271 @@
+---
+import Default from "../layouts/Default.astro";
+
+const layoutProps = {
+  title: "TinyGPT — leaderboard",
+  description: "Browser-trained, browser-runnable LLMs ranked on small benchmarks. Pareto views by params and by training compute.",
+  ogType: "website",
+  ogTitle: "TinyGPT leaderboard",
+  ogDescription: "Train an LLM in your browser tab. Submit it. See how it ranks against the gallery models and the community.",
+  twitterTitle: "TinyGPT leaderboard",
+  twitterDescription: "Train an LLM in your browser tab. Submit it. See how it ranks against the gallery models and the community.",
+  themeColor: "#08090a",
+};
+
+const pageStyle = `
+:root {
+  color-scheme: dark;
+  --base: #08090a;
+  --panel: #0d0e10;
+  --panel-2: #141518;
+  --line: #1d1f23;
+  --line-strong: #2c2f35;
+  --fg: #e7e8ea;
+  --muted: #9296a0;
+  --faint: #787d88;
+  --accent: #48e5c2;
+  --accent-dim: #1f6f5f;
+  --accent-glow: #48e5c233;
+  --gold: #f5b14a;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--base); color: var(--fg);
+  font-family: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  margin: 0; padding: 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 56px 24px 120px; }
+.hero h1 { font-size: clamp(28px, 4.5vw, 44px); margin: 0 0 12px; letter-spacing: -0.02em; }
+.hero p.sub { color: var(--muted); margin: 0 0 36px; font-size: 16px; line-height: 1.5; max-width: 680px; }
+.nav { display: flex; gap: 16px; margin: 0 0 24px; font-size: 13px; color: var(--muted); }
+.nav a { color: var(--muted); }
+.nav a:hover { color: var(--fg); }
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); margin: 0 0 24px; }
+.tab { font: 500 13px/1.3 inherit; color: var(--muted);
+  padding: 12px 20px; border-bottom: 2px solid transparent;
+  background: none; border-left: none; border-right: none; border-top: none;
+  cursor: pointer; }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.benchInfo { color: var(--faint); font-size: 12px; margin: 16px 0 20px;
+  padding: 16px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; line-height: 1.5; }
+.benchInfo strong { color: var(--fg); }
+table.board { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.board th { text-align: left; padding: 12px 14px; color: var(--faint);
+  font-weight: 600; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+table.board td { padding: 14px; border-bottom: 1px solid var(--line); }
+table.board tr.hover:hover td { background: var(--panel); }
+table.board td.score { font-family: "Geist Mono", ui-monospace, monospace;
+  color: var(--accent); font-weight: 600; }
+table.board td.rank { color: var(--faint); width: 36px; font-family: monospace; }
+table.board td.rank.gold { color: var(--gold); }
+table.board td.params { font-family: monospace; color: var(--muted); }
+.icon { font-size: 18px; margin-right: 8px; }
+.entry-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.subline { display: block; color: var(--faint); font-size: 11px; margin-top: 2px;
+  font-family: monospace; }
+.featured-pill { display: inline-block; background: var(--accent-glow);
+  color: var(--accent); padding: 1px 8px; border-radius: 999px;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; margin-left: 8px; vertical-align: 1px; }
+.browser-pill { display: inline-block; background: rgba(245, 177, 74, 0.12);
+  color: var(--gold); padding: 1px 8px; border-radius: 999px;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; margin-left: 8px; vertical-align: 1px; }
+.empty { text-align: center; padding: 48px 24px; color: var(--faint); font-size: 14px; }
+.empty p { margin: 0 0 12px; }
+.empty code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+.cta { margin-top: 32px; padding: 20px 24px; background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: 10px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; }
+.cta-text { color: var(--muted); font-size: 13px; max-width: 540px; line-height: 1.5; }
+.cta-text strong { color: var(--fg); }
+.cta-btn { background: var(--accent); color: #061915; padding: 10px 20px;
+  font-weight: 600; font-size: 13px; border-radius: 6px; border: none;
+  cursor: pointer; text-decoration: none; }
+.cta-btn:hover { background: #5af0cd; }
+`;
+---
+
+<Default {...layoutProps}>
+  <style set:html={pageStyle}></style>
+
+  <div class="wrap">
+    <div class="nav">
+      <a href="/">← playground</a>
+      <a href="/devlog.html">devlog</a>
+      <a href="/roadmap.html">roadmap</a>
+      <a href="/speedup.html">speedup</a>
+    </div>
+
+    <div class="hero">
+      <h1>Leaderboard</h1>
+      <p class="sub">
+        Small models, browser-runnable, ranked. Each entry is a
+        <code>.tinygpt</code> checkpoint you can load and try in one click.
+        The launch benchmark is <strong>TinyStories PPL</strong> — perplexity
+        on a 50-story holdout. Lower is better. More benchmarks (sort-6,
+        reverse-16, shakespeare-ppl) land next.
+      </p>
+    </div>
+
+    <div id="tabs" class="tabs">
+      <button class="tab active" data-bench="tinystories-ppl">TinyStories PPL</button>
+      <button class="tab" data-bench="sort-6">Sort-6</button>
+      <button class="tab" data-bench="reverse-16">Reverse-16</button>
+    </div>
+
+    <div id="benchInfo" class="benchInfo">
+      <strong>TinyStories PPL.</strong> Held-out perplexity over 50 stories
+      from a slice of the TinyStories corpus that wasn't seen during gallery
+      training. Score = exp(mean per-byte cross-entropy). Browser-trainable
+      models with ~1–10M params can credibly compete (Eldan & Li 2023
+      showed 1M-param models cross the coherence threshold on this
+      distribution).
+    </div>
+
+    <table class="board" id="board">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Model</th>
+          <th>Params</th>
+          <th>Score</th>
+          <th>Train</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="boardBody">
+        <tr><td colspan="6" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+
+    <div class="cta">
+      <div class="cta-text">
+        <strong>Train one in your browser tab.</strong> Pick a corpus, hit
+        Start, wait minutes-not-days. When the model converges, hit
+        "Download model" — you get a <code>.tinygpt</code> file. The
+        gallery cards above are all browser-trained 9.6M-param models;
+        a sort-6 / reverse-16 model can be 100× smaller and beat them.
+        Submission flow ships next — for now, open a PR adding your
+        model to <code>data/gallery/</code> and we'll score it.
+      </div>
+      <a href="/" class="cta-btn">Train one →</a>
+    </div>
+  </div>
+
+  <script type="module" is:inline>
+    // Tiny client-side renderer — reads /gallery/manifest.json and groups
+    // by benchmark id. The board updates when a different benchmark tab is
+    // clicked. Single file, ~80 lines, no framework — same monastic style
+    // as the rest of the site.
+    function formatParams(n) {
+      if (n == null) return "—";
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(0) + "K";
+      return String(n);
+    }
+    function formatDuration(ms) {
+      if (ms == null) return "—";
+      const min = ms / 60000;
+      if (min >= 60) return (min / 60).toFixed(1) + " hr";
+      if (min >= 1) return min.toFixed(0) + " min";
+      return (ms / 1000).toFixed(0) + " s";
+    }
+    function formatScore(s, lowerIsBetter) {
+      if (s == null) return "—";
+      const formatted = s < 10 ? s.toFixed(3) : s.toFixed(1);
+      return formatted;
+    }
+
+    const BENCHES = {
+      "tinystories-ppl": {
+        name: "TinyStories PPL",
+        lowerIsBetter: true,
+        explainer:
+          "<strong>TinyStories PPL.</strong> Held-out perplexity over 50 stories from a slice of the TinyStories corpus that wasn't seen during gallery training. Score = exp(mean per-byte cross-entropy). Lower is better. The cleanest universal benchmark — every byte-level LM gets a real number, with clear differentiation between in-distribution and out-of-distribution models.",
+      },
+      "sort-6": {
+        name: "Sort-6",
+        lowerIsBetter: false,
+        explainer:
+          "<strong>Sort-6.</strong> Karpathy minGPT algorithmic task. Prompt is \"sort: 5 1 4 2 6 3 = \", model must continue \"1 2 3 4 5 6\". Exact-match accuracy over 200 deterministic trials, higher is better. The existing gallery cards score near 0% because they were never trained on this task — this benchmark exists for SUBMISSIONS that target it directly. The pareto view \"score per params\" rewards getting to 90%+ with the fewest params.",
+      },
+      "reverse-16": {
+        name: "Reverse-16",
+        lowerIsBetter: false,
+        explainer:
+          "<strong>Reverse-16.</strong> Reverse a lowercase string of up to 16 characters. Slightly harder than sort-6 because the last input character must become the first of the output (longer dependency tail across the equals sign). Same Karpathy task family. Exact-match over 200 deterministic trials, higher is better.",
+      },
+    };
+
+    let manifest = null;
+    async function load() {
+      try {
+        const r = await fetch("/gallery/manifest.json", { cache: "no-cache" });
+        manifest = await r.json();
+      } catch (e) {
+        document.getElementById("boardBody").innerHTML =
+          '<tr><td colspan="6" class="empty"><p>couldn\'t load manifest</p></td></tr>';
+        return;
+      }
+      render("tinystories-ppl");
+    }
+
+    function render(benchId) {
+      const meta = BENCHES[benchId];
+      if (!meta || !manifest) return;
+      // Swap the explainer copy in the bench-info card.
+      const info = document.getElementById("benchInfo");
+      if (info && meta.explainer) info.innerHTML = meta.explainer;
+      const models = (manifest.models || []).slice();
+      // Keep only entries with a non-null score for this benchmark.
+      const scored = models
+        .filter((m) => m.benchmarks && m.benchmarks[benchId] != null)
+        .sort((a, b) => meta.lowerIsBetter
+          ? a.benchmarks[benchId] - b.benchmarks[benchId]
+          : b.benchmarks[benchId] - a.benchmarks[benchId]);
+      const body = document.getElementById("boardBody");
+      if (scored.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" class="empty">' +
+          '<p>No scored entries on <strong>' + meta.name + '</strong> yet.</p>' +
+          '<p>The 5 gallery cards will appear here once they\'re run through the eval engine ' +
+          '(<code>browser/score_gallery.mjs</code>) — landing in the next ship.</p>' +
+          '</td></tr>';
+        return;
+      }
+      body.innerHTML = scored.map((m, i) => {
+        const rank = i + 1;
+        const rankClass = rank <= 3 ? "rank gold" : "rank";
+        const score = m.benchmarks[benchId];
+        const params = formatParams(m.paramCount);
+        const wall = formatDuration(m.trainWallMs);
+        const featured = m.submission?.featured ? '<span class="featured-pill">curated</span>' : "";
+        const browser = m.submission?.browserTrained ? '<span class="browser-pill">browser</span>' : "";
+        const subline = m.corpus ? '<span class="subline">trained on ' + m.corpus + '</span>' : "";
+        return '<tr class="hover">' +
+          '<td class="' + rankClass + '">' + rank + '</td>' +
+          '<td><span class="entry-name"><span class="icon">' + (m.icon || "•") + "</span>" +
+            m.name + featured + browser + '</span>' + subline + '</td>' +
+          '<td class="params">' + params + '</td>' +
+          '<td class="score">' + formatScore(score, meta.lowerIsBetter) + '</td>' +
+          '<td class="params">' + wall + '</td>' +
+          '<td><a href="/?gallery=' + encodeURIComponent(m.id) + '">try →</a></td>' +
+          '</tr>';
+      }).join("");
+    }
+
+    document.getElementById("tabs").addEventListener("click", (e) => {
+      const btn = e.target.closest(".tab");
+      if (!btn) return;
+      document.querySelectorAll("#tabs .tab").forEach((t) => t.classList.remove("active"));
+      btn.classList.add("active");
+      render(btn.dataset.bench);
+    });
+
+    load();
+  </script>
+</Default>
