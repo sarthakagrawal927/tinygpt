@@ -53,6 +53,17 @@ data/*.jsonl
 # (browser/public/demo.tinygpt) is committed; everything else stays out.
 data/checkpoints/*.tinygpt
 
+# Per-gallery raw training data (corpora + scratch). Each subdir often
+# runs to hundreds of MB — keep them on disk locally, don't bloat the
+# repo. The TRAINED checkpoints land under browser/public/gallery as
+# .bin files via the publish step; those are committed.
+data/gallery/
+
+# Locally-built Mac CLI checkpoint dropped into the gallery dir for
+# offline browser-side testing. 100MB+ — exceeds GitHub's per-file
+# limit and isn't part of the shipped artifact set.
+browser/public/gallery/mac-trained.tinygpt
+
 # OS / editor
 .DS_Store
 *.swp
