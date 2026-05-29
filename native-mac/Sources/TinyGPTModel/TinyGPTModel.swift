@@ -46,7 +46,11 @@ public final class TinyGPTModel: Module {
         self._positionEmbedding.wrappedValue = Embedding(
             embeddingCount: config.contextLength, dimensions: config.dModel
         )
-        self._blocks.wrappedValue = (0..<config.nLayers).map { _ in TransformerBlock(config) }
+        self._blocks.wrappedValue = (0..<config.nLayers).map { _ in
+            let b = TransformerBlock(config)
+            b.useGradCheckpoint = config.useGradCheckpoint
+            return b
+        }
         self._lnFinal.wrappedValue = LayerNorm(dimensions: config.dModel, eps: 1e-5)
         if !config.tieEmbeddings {
             self._lmHead.wrappedValue = Linear(config.dModel, config.vocabSize, bias: false)

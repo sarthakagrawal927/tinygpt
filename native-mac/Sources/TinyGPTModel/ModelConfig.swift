@@ -115,6 +115,18 @@ public struct ModelConfig: Sendable, Equatable {
     /// manifest-compatibility) but go unused at forward time.
     public var useYOCO: Bool
 
+    /// Gradient checkpointing (a.k.a. activation checkpointing). Trades
+    /// ~30% extra compute per training step for a ~√L reduction in
+    /// activation memory (where L is the number of transformer layers).
+    /// Each TransformerBlock's forward is wrapped in an MLX
+    /// `CustomFunction` whose VJP RE-RUNS the block forward at backward
+    /// time — so the intermediate activations (K/V projections, MLP
+    /// inner state, residual stream) for that block are not retained
+    /// across the backward of OTHER blocks. Training-only knob: the
+    /// flag travels in the .tinygpt header so a `--resume` keeps the
+    /// same memory profile, but inference/sample paths never read it.
+    public var useGradCheckpoint: Bool
+
     public var headDim: Int { dModel / nHeads }
 
     public var mlxDType: DType {
@@ -151,7 +163,8 @@ public struct ModelConfig: Sendable, Equatable {
         useALiBi: Bool = false,
         useMoD: Bool = false,
         useDifferentialAttention: Bool = false,
-        useYOCO: Bool = false
+        useYOCO: Bool = false,
+        useGradCheckpoint: Bool = false
     ) {
         self.tokenizerSource = tokenizerSource
         self.nExperts = max(1, nExperts)
@@ -163,6 +176,7 @@ public struct ModelConfig: Sendable, Equatable {
         self.useMoD = useMoD
         self.useDifferentialAttention = useDifferentialAttention
         self.useYOCO = useYOCO
+        self.useGradCheckpoint = useGradCheckpoint
         self.modelName = modelName
         self.vocabSize = vocabSize
         self.contextLength = contextLength

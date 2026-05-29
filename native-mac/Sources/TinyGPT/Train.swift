@@ -76,6 +76,11 @@ enum Train {
         // YOCO (Lin et al., 2024). Second half cross-attends to the
         // anchor; halves KV cache memory at long-context decode.
         var useYOCO: Bool = false
+        // Gradient (activation) checkpointing. Trades ~30% extra
+        // compute for a large reduction in activation memory. Each
+        // TransformerBlock's forward is wrapped in a CustomFunction
+        // whose VJP recomputes the block forward at backward time.
+        var useGradCheckpoint: Bool = false
 
         var i = 0
         while i < args.count {
@@ -108,6 +113,7 @@ enum Train {
             case "--mod":            useMoD = true; i += 1
             case "--diff-attn":      useDiffAttn = true; i += 1
             case "--yoco":           useYOCO = true; i += 1
+            case "--grad-checkpoint": useGradCheckpoint = true; i += 1
             case "-h", "--help":  exitUsage()
             default:
                 fputs("unknown flag: \(args[i])\n", stderr); exitUsage()
@@ -147,7 +153,12 @@ enum Train {
                 slidingWindow: h.slidingWindow,
                 useMoD: h.useMoD ?? false,
                 useDifferentialAttention: h.useDifferentialAttention ?? false,
-                useYOCO: h.useYOCO ?? false
+                useYOCO: h.useYOCO ?? false,
+                // Grad-checkpoint travels with the checkpoint so a
+                // resumed long run keeps the same memory profile. CLI
+                // --grad-checkpoint can ALSO promote a non-checkpointed
+                // resume into a checkpointed continuation.
+                useGradCheckpoint: (h.useGradCheckpoint ?? false) || useGradCheckpoint
             )
             cfg.dtype = dtype
             model = TinyGPTModel(cfg)
@@ -208,6 +219,9 @@ enum Train {
             // cross-attention. Manifest stays identical to the standard
             // dense path; the change is purely in forward orchestration.
             cfg.useYOCO = useYOCO
+            // Gradient checkpointing — must be set BEFORE the model is
+            // built so each TransformerBlock picks it up at init time.
+            cfg.useGradCheckpoint = useGradCheckpoint
             model = TinyGPTModel(cfg)
         }
         // MoE checkpoints now serialise — the manifest gains router +
@@ -350,6 +364,7 @@ enum Train {
         train/val:     \(trainSummary) / \(valSummary)
         lr schedule:   \(lrSchedule)\(useSchedule ? " (warmup \(warmupSteps), max \(maxLR), min \(minLR))" : " @ \(maxLR)")
         grad clip:     \(effectiveClip.map { "global L2 ≤ \($0)" } ?? "off")
+        grad ckpt:     \(cfg.useGradCheckpoint ? "on (per-block VJP recompute · ~30% slower, ~√L activation mem)" : "off")
         save-every:    \(saveEvery.map { "\($0) steps · atomic" } ?? "end only")
         compile:       \(canCompile ? "on" : (useSchedule ? "off (LR scheduling)" : "off (gradient accumulation)"))
         device:        \(Device.defaultDevice())
@@ -361,6 +376,12 @@ enum Train {
         // instead of dying mid-step.
         TrainSupport.installSigintHandler()
         TrainSupport.stopRequested.reset()
+
+        // Reset MLX's peak-memory counter at the start of training so
+        // the post-run report reflects what training actually consumed
+        // (and doesn't include loader/init transients). Always-on; the
+        // post-run report uses the same value either way.
+        MLX.Memory.peakMemory = 0  // setter triggers mlx_reset_peak_memory
 
         let t0 = Date()
         var lastLoss: Float = 0
@@ -449,10 +470,24 @@ enum Train {
             }
         }
         let elapsed = -t0.timeIntervalSinceNow
+        let stepsDone = lastStep - startStep
+        let stepsPerSec = elapsed > 0 ? Double(stepsDone) / elapsed : 0
         let summary = stoppedEarly
             ? "interrupted at step \(lastStep) of \(steps) after \(String(format: "%.1f", elapsed))s · loss \(String(format: "%.3f", lastLoss))"
-            : "done — \(lastStep - startStep) steps in \(String(format: "%.1f", elapsed))s (\(String(format: "%.1f", Double(lastStep - startStep) / elapsed)) step/s) · final loss \(String(format: "%.3f", lastLoss))"
+            : "done — \(stepsDone) steps in \(String(format: "%.1f", elapsed))s (\(String(format: "%.1f", stepsPerSec)) step/s) · final loss \(String(format: "%.3f", lastLoss))"
         print("\n\(summary)")
+
+        // Peak GPU-memory report. Always-on at end of training since the
+        // counter was reset at start anyway; the line is one of the most
+        // useful diagnostics for sizing future runs / verifying that
+        // --grad-checkpoint actually reduced activation memory.
+        let peak = MLX.Memory.peakMemory
+        let snap = MLX.Memory.snapshot()
+        print(String(format: "memory:  peak=%@  active=%@  cache=%@%@",
+                      formatBytes(peak),
+                      formatBytes(snap.activeMemory),
+                      formatBytes(snap.cacheMemory),
+                      cfg.useGradCheckpoint ? "  · grad-checkpoint=on" : ""))
 
         // Final save (always — covers both completion and Ctrl-C cases).
         if let out = outPath {
@@ -658,6 +693,13 @@ enum Train {
           --alibi                         Use ALiBi position bias (Press et al., 2021)
                                            in lieu of positional embeddings/RoPE. Better
                                            extrapolation beyond train context length.
+          --grad-checkpoint               Activation (gradient) checkpointing. Wraps each
+                                           TransformerBlock's forward in a CustomFunction
+                                           whose VJP recomputes the block forward at
+                                           backward time. ~30% step-time overhead in
+                                           exchange for dramatically lower activation
+                                           memory — unlocks bigger models / batches at
+                                           the cost of speed.
 
         Long-run safety nets:
           --resume <path.tinygpt>         Continue from a saved checkpoint

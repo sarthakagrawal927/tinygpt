@@ -196,7 +196,8 @@ public enum ModelLoader {
             slidingWindow: h.slidingWindow,
             useMoD: h.useMoD ?? false,
             useDifferentialAttention: h.useDifferentialAttention ?? false,
-            useYOCO: h.useYOCO ?? false
+            useYOCO: h.useYOCO ?? false,
+            useGradCheckpoint: h.useGradCheckpoint ?? false
         )
         let m = TinyGPTModel(cfg)
         try TinyGPTWeightLoader.load(file, into: m)

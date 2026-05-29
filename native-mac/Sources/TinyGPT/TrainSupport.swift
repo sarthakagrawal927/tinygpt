@@ -124,7 +124,8 @@ enum TrainSupport {
                 slidingWindow: cfg.slidingWindow,
                 useMoD: cfg.useMoD ? true : nil,
                 useDifferentialAttention: cfg.useDifferentialAttention ? true : nil,
-                useYOCO: cfg.useYOCO ? true : nil
+                useYOCO: cfg.useYOCO ? true : nil,
+                useGradCheckpoint: cfg.useGradCheckpoint ? true : nil
             ),
             manifest: entries,
             savedAt: ISO8601DateFormatter().string(from: Date()),

@@ -54,6 +54,15 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
         /// half's anchor K, V.
         public var useYOCO: Bool?
 
+        /// Gradient (activation) checkpointing flag. `nil` / false =
+        /// standard training (all activations retained). When true,
+        /// each TransformerBlock's forward is wrapped in an MLX
+        /// `CustomFunction` whose VJP recomputes the forward at
+        /// backward time — trading ~30% extra compute for a large
+        /// reduction in activation memory. Training-only knob;
+        /// inference paths ignore it.
+        public var useGradCheckpoint: Bool?
+
         public init(
             layers: Int? = nil,
             dModel: Int? = nil,
@@ -70,7 +79,8 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
             slidingWindow: Int? = nil,
             useMoD: Bool? = nil,
             useDifferentialAttention: Bool? = nil,
-            useYOCO: Bool? = nil
+            useYOCO: Bool? = nil,
+            useGradCheckpoint: Bool? = nil
         ) {
             self.layers = layers
             self.dModel = dModel
@@ -88,6 +98,7 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
             self.useMoD = useMoD
             self.useDifferentialAttention = useDifferentialAttention
             self.useYOCO = useYOCO
+            self.useGradCheckpoint = useGradCheckpoint
         }
     }
 

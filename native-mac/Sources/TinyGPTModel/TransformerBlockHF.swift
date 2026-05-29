@@ -32,6 +32,10 @@ public final class TransformerBlockHF: Module {
     /// `cfg.isMoE` and the model is HF.
     public var mlpUnit: Module { mlp }
 
+    /// Gradient checkpointing toggle. See the matching field on
+    /// `TransformerBlock` and `GradCheckpoint.swift` for the mechanism.
+    public var useGradCheckpoint: Bool = false
+
     public init(_ cfg: ModelConfig) {
         // The HF naming convention is `input_layernorm` for ln1 and
         // `post_attention_layernorm` for ln2. We use those keys so
@@ -44,6 +48,18 @@ public final class TransformerBlockHF: Module {
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
+        if useGradCheckpoint {
+            return GradCheckpoint.wrap(block: self, x: x) { b, xt in
+                b.rawForward(xt)
+            }
+        }
+        return rawForward(x)
+    }
+
+    /// Raw block forward — also used as the recompute payload inside
+    /// `GradCheckpoint.wrap`. Does NOT consult `useGradCheckpoint` so
+    /// the wrapper's VJP doesn't recurse.
+    public func rawForward(_ x: MLXArray) -> MLXArray {
         var x = x
         x = x + attn(ln1(x))
         x = x + mlp(ln2(x))

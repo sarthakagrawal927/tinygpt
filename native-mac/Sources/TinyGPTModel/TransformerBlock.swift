@@ -299,6 +299,13 @@ public final class TransformerBlock: Module {
     /// to walk the model without caring which flavour is active.
     public var mlpUnit: Module { (mlp as Module?) ?? moe! }
 
+    /// Gradient checkpointing toggle — when true, `callAsFunction` wraps
+    /// the raw block forward in a `GradCheckpoint.wrap(...)` so the
+    /// block's intermediate activations don't persist across the outer
+    /// backward. Not a `Module` parameter / not serialised on the block
+    /// itself; the model sets it after construction based on the config.
+    public var useGradCheckpoint: Bool = false
+
     public init(_ cfg: ModelConfig) {
         self._ln1.wrappedValue = LayerNorm(dimensions: cfg.dModel, eps: 1e-5)
         self._attn.wrappedValue = CausalSelfAttention(cfg)
@@ -327,6 +334,24 @@ public final class TransformerBlock: Module {
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
+        if useGradCheckpoint {
+            // Wrap the raw block forward in a CustomFunction whose VJP
+            // re-runs the same forward at backward time. Block params
+            // are threaded through as CustomFunction inputs so MLX's
+            // autodiff still routes gradients to them. See
+            // GradCheckpoint.swift for the full mechanism.
+            return GradCheckpoint.wrap(block: self, x: x) { b, xt in
+                b.rawForward(xt)
+            }
+        }
+        return rawForward(x)
+    }
+
+    /// Raw block forward — used both as the standard non-checkpointed
+    /// path AND as the "recompute" payload inside `GradCheckpoint.wrap`.
+    /// Importantly, this method does NOT consult `useGradCheckpoint`,
+    /// so the checkpoint wrapper's VJP doesn't recurse into itself.
+    public func rawForward(_ x: MLXArray) -> MLXArray {
         return blockAfterAttn(x: x, attnOut: attentionFor(x: x))
     }
 

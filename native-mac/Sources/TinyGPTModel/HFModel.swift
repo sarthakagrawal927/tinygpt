@@ -36,7 +36,11 @@ public final class TinyGPTModelHF: Module {
         self.config = cfg
         self._tokenEmbedding.wrappedValue = Embedding(
             embeddingCount: cfg.vocabSize, dimensions: cfg.dModel)
-        self._blocks.wrappedValue = (0..<cfg.nLayers).map { _ in TransformerBlockHF(cfg) }
+        self._blocks.wrappedValue = (0..<cfg.nLayers).map { _ in
+            let b = TransformerBlockHF(cfg)
+            b.useGradCheckpoint = cfg.useGradCheckpoint
+            return b
+        }
         self._lnFinal.wrappedValue = RMSNorm(dimensions: cfg.dModel, eps: 1e-5)
         if cfg.tieEmbeddings {
             self._lmHead.wrappedValue = nil
