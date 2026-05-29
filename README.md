@@ -281,6 +281,7 @@ builds and tests them with a normal compiler. Full deploy notes:
 - [`docs/evolution_strategies.md`](docs/evolution_strategies.md) — gradient-free trainer (`tinygpt es`)
 - [`docs/interpretability.md`](docs/interpretability.md) — attention heatmap + logit lens in the playground
 - [`docs/phase_9_10_status.md`](docs/phase_9_10_status.md) — Phase 9 (quant) + Phase 10 (architecture menu): what shipped, what's queued, and the design for each remaining item
+- [`docs/validation_report.md`](docs/validation_report.md) — end-to-end workflows that exercise the Phase 1-10 surfaces
 - [`docs/memory_tradeoffs.md`](docs/memory_tradeoffs.md) — bf16, gradient accumulation, gradient checkpointing — what fits in 48 GB and why
 - [`docs/leaderboard.md`](docs/leaderboard.md) — benchmark framework + how to add a benchmark + how to submit a model
 - [`docs/single_machine_roadmap.md`](docs/single_machine_roadmap.md) — every technique that runs on one Mac, ROI-ranked, with explainers
