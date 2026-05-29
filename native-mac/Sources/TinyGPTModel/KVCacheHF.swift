@@ -83,17 +83,38 @@ extension TinyGPTModelHF {
     /// processes the full prompt and populates K/V at every layer; later
     /// calls usually pass `[B, 1]` for streaming decode.
     ///
+    /// **YOCO**: when `config.useYOCO`, only the FIRST HALF of layers
+    /// grows the cache. Second-half layers cross-attend onto the
+    /// anchor's K, V (read back from `cache.entries[anchorIdx]`) — they
+    /// allocate zero cache and skip K, V projection entirely. Halves
+    /// KV memory at long-context decode.
+    ///
     /// Returns logits of shape `[B, T_new, vocab_size]`.
     public func forwardCached(_ idx: MLXArray, cache: KVCache) -> MLXArray {
         let T = idx.shape[1]
         let basePos = cache.currentLength
         precondition(basePos + T <= config.contextLength,
                      "KV cache + new tokens (\(basePos + T)) exceeds context \(config.contextLength)")
-        // No positional embedding to add — RoPE handles position inside
-        // the attention's K/Q rotation (with basePos shifting it forward).
         var x = tokenEmbedding(idx)
-        for (i, block) in blocks.enumerated() {
-            x = block.forwardCached(x, cache: cache, layer: i, basePos: basePos)
+        if config.useYOCO {
+            let anchorIdx = max(0, (blocks.count / 2) - 1)
+            for (i, block) in blocks.enumerated() {
+                if i <= anchorIdx {
+                    x = block.forwardCached(x, cache: cache, layer: i, basePos: basePos)
+                } else {
+                    // K, V are read back from the anchor's cache slot
+                    // post-RoPE (the rotation is paid once per position
+                    // at the anchor; Q gets its own rotation inside
+                    // CrossAttention at `basePos`).
+                    let k = cache.keys(layer: anchorIdx, asDType: x.dtype)!
+                    let v = cache.values(layer: anchorIdx, asDType: x.dtype)!
+                    x = block.callWithExternalKV(x, k: k, v: v, posOffset: basePos)
+                }
+            }
+        } else {
+            for (i, block) in blocks.enumerated() {
+                x = block.forwardCached(x, cache: cache, layer: i, basePos: basePos)
+            }
         }
         cache.currentLength = basePos + T
         x = lnFinal(x)

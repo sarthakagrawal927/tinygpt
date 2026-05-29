@@ -237,19 +237,44 @@ extension TinyGPTModel {
     /// calls, processes only the new token(s) — typically `idx` is
     /// `[B, 1]` for streaming generation.
     ///
+    /// **YOCO**: when `config.useYOCO`, the cache only stores K, V for the
+    /// FIRST HALF of layers (0..=anchorIdx). Second-half layers don't
+    /// touch the cache at all — they cross-attend onto the anchor's
+    /// already-cached K, V. That's the long-context memory saving:
+    /// `nLayers × KVbytes(T)` → `nLayers/2 × KVbytes(T)`.
+    ///
     /// Returns logits of shape `[B, T_new, vocab_size]`.
     public func forwardCached(_ idx: MLXArray, cache: KVCache) -> MLXArray {
         let T = idx.shape[1]
-        // Position offset: how many tokens are already in the cache.
-        // The new tokens' positions are [cache.currentLength, ..., cache.currentLength + T - 1].
         let basePos = cache.currentLength
         precondition(basePos + T <= config.contextLength,
                      "KV cache + new tokens (\(basePos + T)) exceeds context \(config.contextLength)")
         let positions = MLXArray((0..<T).map { Int32($0 + basePos) })
-        let posEmb = positionEmbedding(positions).expandedDimensions(axis: 0) // [1, T, C]
+        let posEmb = positionEmbedding(positions).expandedDimensions(axis: 0)
         var x = tokenEmbedding(idx) + posEmb
-        for (i, block) in blocks.enumerated() {
-            x = block.forwardCached(x, cache: cache, layer: i)
+        if config.useYOCO {
+            // Only the FIRST HALF of layers grows the cache. The anchor's
+            // post-RoPE K, V come back via `cache.entries[anchorIdx]`
+            // after the anchor block runs — second-half blocks read it
+            // back upcast to q.dtype for cross-attention.
+            let anchorIdx = max(0, (blocks.count / 2) - 1)
+            for (i, block) in blocks.enumerated() {
+                if i <= anchorIdx {
+                    x = block.forwardCached(x, cache: cache, layer: i)
+                } else {
+                    // Read the anchor's cached K, V. The cache stores them
+                    // POST-RoPE-rotation at their absolute positions, so
+                    // cross-attention only needs to rotate Q at the new
+                    // tokens' absolute positions (basePos..basePos+T-1).
+                    let k = cache.keys(layer: anchorIdx, asDType: x.dtype)!
+                    let v = cache.values(layer: anchorIdx, asDType: x.dtype)!
+                    x = block.callWithExternalKV(x, k: k, v: v, posOffset: basePos)
+                }
+            }
+        } else {
+            for (i, block) in blocks.enumerated() {
+                x = block.forwardCached(x, cache: cache, layer: i)
+            }
         }
         cache.currentLength = basePos + T
         x = lnFinal(x)

@@ -286,6 +286,18 @@ public final class TransformerBlock: Module {
     /// for keeping every existing call site that touches `block.attn`
     /// unchanged.
     @ModuleInfo(key: "diff_attn") public var diffAttn: DifferentialAttention?
+    /// YOCO cross-attention sibling — populated on SECOND-half layers when
+    /// `cfg.useYOCO` is set. When non-nil, the block's forward routes
+    /// through `crossAttn` (Q-only projections) instead of `attn`. The
+    /// caller (TinyGPTModel.forwardToHidden) is responsible for threading
+    /// the anchor's K, V into `callWithCrossAttention`. The existing
+    /// `attn` stays allocated so the manifest layout / LoRA targeting
+    /// stays stable; its weights are dead at forward time on second-half
+    /// layers but are still trained as part of the param tree until the
+    /// first save filters them out (future work). See CrossAttention.swift
+    /// for the design rationale of a dedicated module vs. extension-on-
+    /// `CausalSelfAttention`.
+    @ModuleInfo(key: "cross_attn") public var crossAttn: CrossAttention?
     /// Mixture-of-Depths per-token router (Raposo et al., 2024).
     /// Linear(d_model → 1), populated when cfg.useMoD. When present,
     /// the block's contribution is gated by sigmoid(router(x)) per
@@ -306,7 +318,7 @@ public final class TransformerBlock: Module {
     /// itself; the model sets it after construction based on the config.
     public var useGradCheckpoint: Bool = false
 
-    public init(_ cfg: ModelConfig) {
+    public init(_ cfg: ModelConfig, yocoSecondHalf: Bool = false) {
         self._ln1.wrappedValue = LayerNorm(dimensions: cfg.dModel, eps: 1e-5)
         self._attn.wrappedValue = CausalSelfAttention(cfg)
         self._ln2.wrappedValue = LayerNorm(dimensions: cfg.dModel, eps: 1e-5)
@@ -329,6 +341,16 @@ public final class TransformerBlock: Module {
             self._diffAttn.wrappedValue = DifferentialAttention(cfg)
         } else {
             self._diffAttn.wrappedValue = nil
+        }
+        // YOCO crossAttn — set HERE at init time (the only legal point
+        // to set an Optional @ModuleInfo) when this layer is in the
+        // second half. The block needs the layer index to decide; init
+        // takes `yocoSecondHalf` from the model. Defaults to false to
+        // keep all existing TransformerBlock(cfg) call sites working.
+        if cfg.useYOCO && yocoSecondHalf {
+            self._crossAttn.wrappedValue = CrossAttention(cfg)
+        } else {
+            self._crossAttn.wrappedValue = nil
         }
         super.init()
     }
@@ -374,9 +396,21 @@ public final class TransformerBlock: Module {
 
     /// YOCO cross-attention variant: Q is fresh from current x; K, V
     /// come from the anchor. kProj / vProj are NOT invoked — that's
-    /// the KV-cache memory saving downstream.
-    public func callWithExternalKV(_ x: MLXArray, k: MLXArray, v: MLXArray) -> MLXArray {
-        let attnOut = attn.forwardWithExternalKV(ln1(x), k: k, v: v)
+    /// the KV-cache memory saving downstream. Prefers the dedicated
+    /// `crossAttn` sibling when installed (no k_proj/v_proj allocated
+    /// at all on that path); falls back to the `attn.forwardWithExternalKV`
+    /// extension for backwards compatibility with blocks built before
+    /// `installCrossAttention` was wired.
+    public func callWithExternalKV(_ x: MLXArray, k: MLXArray, v: MLXArray,
+                                    posOffset: Int = 0) -> MLXArray {
+        let attnOut: MLXArray
+        if let ca = crossAttn {
+            attnOut = ca(ln1(x), externalK: k, externalV: v, posOffset: posOffset)
+        } else {
+            // Legacy path — only correct when posOffset == 0 because
+            // `forwardWithExternalKV` doesn't take an offset.
+            attnOut = attn.forwardWithExternalKV(ln1(x), k: k, v: v)
+        }
         return blockAfterAttn(x: x, attnOut: attnOut)
     }
 

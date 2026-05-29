@@ -374,6 +374,41 @@ enum Sample {
         print("\n")
         let cacheLabel = useActualCache ? "KV-cached" : "uncached"
         print("(\(maxTokens) tokens in \(String(format: "%.2f", elapsed))s — \(String(format: "%.0f", tokensPerSec)) tok/s · \(cacheLabel))")
+
+        // KV cache size report — useful for verifying YOCO's halving
+        // claim and KV-quantize savings. Counts only populated layers
+        // (under YOCO the second-half layers leave their slot empty).
+        if useActualCache, let c = cache {
+            var totalBytes = 0
+            var populatedLayers = 0
+            for (i, e) in c.entries.enumerated() {
+                // Trust the stored dtype's byte width; defaults to 4 if
+                // we somehow loaded an unknown type.
+                let kBytes = e.keys.shape.reduce(1, *) * dtypeByteWidth(e.keys.dtype)
+                let vBytes = e.values.shape.reduce(1, *) * dtypeByteWidth(e.values.dtype)
+                totalBytes += kBytes + vBytes
+                if e.keys.shape[2] > 0 { populatedLayers += 1 }
+                _ = i
+            }
+            let yocoTag = cfg.useYOCO ? "  · YOCO (\(populatedLayers)/\(cfg.nLayers) layers populated)" : ""
+            print(String(format: "KV cache:  %d tokens · %@%@",
+                          c.currentLength, formatBytes(totalBytes), yocoTag))
+        }
+    }
+
+    private static func dtypeByteWidth(_ dt: DType) -> Int {
+        switch dt {
+        case .float16, .bfloat16: return 2
+        case .float32: return 4
+        case .int8, .uint8: return 1
+        default: return 4
+        }
+    }
+
+    private static func formatBytes(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1f MB", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.1f KB", Double(n) / 1_000) }
+        return "\(n) B"
     }
 
     private static func MLXRandomCategorical(_ logits: MLXArray) -> MLXArray {

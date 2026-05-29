@@ -46,8 +46,14 @@ public final class TinyGPTModel: Module {
         self._positionEmbedding.wrappedValue = Embedding(
             embeddingCount: config.contextLength, dimensions: config.dModel
         )
-        self._blocks.wrappedValue = (0..<config.nLayers).map { _ in
-            let b = TransformerBlock(config)
+        // YOCO layer split: SECOND-half layers (strictly after the
+        // anchor) get a CrossAttention sibling. Anchor is the LAST
+        // first-half layer (`anchorIdx = nLayers/2 - 1`); the first half
+        // (including the anchor itself) uses standard self-attention.
+        let yocoAnchorIdx = max(0, (config.nLayers / 2) - 1)
+        self._blocks.wrappedValue = (0..<config.nLayers).map { i in
+            let secondHalf = config.useYOCO && i > yocoAnchorIdx
+            let b = TransformerBlock(config, yocoSecondHalf: secondHalf)
             b.useGradCheckpoint = config.useGradCheckpoint
             return b
         }

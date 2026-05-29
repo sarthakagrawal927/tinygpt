@@ -36,8 +36,11 @@ public final class TinyGPTModelHF: Module {
         self.config = cfg
         self._tokenEmbedding.wrappedValue = Embedding(
             embeddingCount: cfg.vocabSize, dimensions: cfg.dModel)
-        self._blocks.wrappedValue = (0..<cfg.nLayers).map { _ in
-            let b = TransformerBlockHF(cfg)
+        // YOCO layer split — see `TinyGPTModel.init` for the rationale.
+        let yocoAnchorIdx = max(0, (cfg.nLayers / 2) - 1)
+        self._blocks.wrappedValue = (0..<cfg.nLayers).map { i in
+            let secondHalf = cfg.useYOCO && i > yocoAnchorIdx
+            let b = TransformerBlockHF(cfg, yocoSecondHalf: secondHalf)
             b.useGradCheckpoint = cfg.useGradCheckpoint
             return b
         }
@@ -59,8 +62,31 @@ public final class TinyGPTModelHF: Module {
             let noise = MLXRandom.uniform(low: -s, high: s, x.shape).asType(x.dtype)
             x = x + noise
         }
-        for block in blocks {
-            x = block(x)
+        if config.useYOCO {
+            // YOCO orchestration: first half runs standard self-attention;
+            // the LAST first-half block captures its (K, V); second-half
+            // blocks cross-attend against that captured pair. Halves the
+            // KV cache memory at long-context decode (see KVCacheHF.swift).
+            let anchorIdx = max(0, (blocks.count / 2) - 1)
+            var yocoK: MLXArray? = nil
+            var yocoV: MLXArray? = nil
+            for (i, block) in blocks.enumerated() {
+                if i < anchorIdx {
+                    x = block(x)
+                } else if i == anchorIdx {
+                    let r = block.callCapturingKV(x)
+                    x = r.out; yocoK = r.k; yocoV = r.v
+                } else {
+                    guard let k = yocoK, let v = yocoV else {
+                        preconditionFailure("YOCO anchor missing at HF layer \(i)")
+                    }
+                    x = block.callWithExternalKV(x, k: k, v: v)
+                }
+            }
+        } else {
+            for block in blocks {
+                x = block(x)
+            }
         }
         x = lnFinal(x)
         if let head = lmHead {
