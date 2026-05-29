@@ -54,6 +54,8 @@ import { promises as fs } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { GalleryManifest } from "./src/gallery-schema.ts";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = resolve(__dirname, "public/gallery");
 
@@ -344,7 +346,7 @@ for (const id of ids) {
 // that ONLY has fp16 (no `fileInt4`) and the browser will Just Work.
 try {
   const manifestPath = resolve(OUT_DIR, "manifest.json");
-  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  const manifest: GalleryManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   for (const m of manifest.models) {
     const r = reports.find((x) => x.id === m.id);
     if (!r) continue;

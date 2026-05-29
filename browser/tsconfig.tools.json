@@ -1,0 +1,47 @@
+// TypeScript config for the Node-side tooling scripts at the browser/
+// root (gallery scorers, manifest builders, perf measurement, e2e
+// drivers). Separate from the main browser tsconfig because these
+// scripts:
+//   - run in Node (need @types/node, no DOM lib)
+//   - are loose-typed by intent (one-shot orchestration code, not
+//     production paths) — verbatimModuleSyntax + the strict-unused
+//     checks would generate noise without finding real bugs
+//
+// Invoked manually:  npx tsc --noEmit -p tsconfig.tools.json
+// Hooked from npm:   `npm run typecheck:tools` (see package.json)
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // DOM lib included because Playwright `page.evaluate(() => …)`
+    // blocks reference DOM globals (getComputedStyle, document, etc.)
+    // even though the surrounding code is Node. The blocks run in the
+    // browser context; tsc sees them as Node code and complains
+    // without DOM types.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    // Tooling scripts are loose-typed by intent — `strict` would force
+    // null-checks on every `document.querySelector` (Playwright pages
+    // run code where the elements provably exist) and annotations on
+    // every helper-function parameter without finding real bugs. Types
+    // where they MATTER (schema boundaries — manifest, header,
+    // benchmarks) come from explicit imports of the gallery-schema +
+    // benchmarks/types modules.
+    "strict": false,
+    "useUnknownInCatchVariables": false,
+    "verbatimModuleSyntax": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "allowImportingTsExtensions": true,
+    "moduleResolution": "bundler"
+  },
+  "include": [
+    "src/gallery-schema.ts",
+    "src/benchmarks/types.ts",
+    "*.ts",
+    "scripts/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.astro",
+    "node_modules"
+  ]
+}

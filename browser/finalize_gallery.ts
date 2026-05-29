@@ -1,4 +1,4 @@
-// finalize_gallery.mjs — assemble the gallery from canonical training outputs.
+// finalize_gallery.ts — assemble the gallery from canonical training outputs.
 //
 // Inputs: data/gallery/<id>.{tinygpt, sample.txt, meta.json}  (one set per id)
 // Outputs:
@@ -10,7 +10,7 @@
 // not data/gallery/, so it's added from a static descriptor below).
 //
 // Usage:
-//   node browser/finalize_gallery.mjs
+//   node browser/finalize_gallery.ts
 //
 // Optional --only=id1,id2,... to convert just a subset (handy when one model
 // finishes ahead of the others).
@@ -18,6 +18,8 @@
 import { promises as fs } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import type { GalleryManifest } from "./src/gallery-schema.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -370,7 +372,7 @@ for (const slot of SLOTS) {
 }
 
 const wordForCount = (n) => ["zero", "one", "two", "three", "four", "five", "six"][n] ?? String(n);
-const manifest = {
+const manifest: GalleryManifest = {
   version: 1,
   note:
     `All ${wordForCount(built.length)} models share the same architecture ` +

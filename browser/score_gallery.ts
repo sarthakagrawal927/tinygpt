@@ -1,4 +1,4 @@
-// score_gallery.mjs — run each canonical .tinygpt model in data/gallery/
+// score_gallery.ts — run each canonical .tinygpt model in data/gallery/
 // through the TinyStories-PPL benchmark and write the scores back into
 // the gallery manifest.
 //
@@ -12,12 +12,29 @@
 //        e. Call tg_eval many times → mean loss → perplexity
 //   3. Update browser/public/gallery/manifest.json with benchmarks scores
 //
-// Run:  node browser/score_gallery.mjs
+// Run:  node browser/score_gallery.ts        (Node 24+ native TS support)
 // Outputs: browser/public/gallery/manifest.json (updated in-place)
 
 import { promises as fs } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import type { GalleryManifest, GalleryModel } from "./src/gallery-schema.ts";
+
+/// Emscripten WASM handle — opaque pointer to a tg_model_create result.
+/// 0 is the failure value; non-zero is a valid handle.
+type WasmHandle = number;
+
+/// Minimal shape of the Emscripten module — only the surface we use.
+/// The .js file produced by emcc exposes many more, but we don't reach
+/// for them. Typed as `any` for the cwrap returns because their generics
+/// don't add safety in practice.
+interface TinyGPTModule {
+  cwrap: (name: string, ret: string | null, args: (string | null)[]) => (...a: number[]) => number;
+  _malloc: (n: number) => number;
+  _free: (ptr: number) => void;
+  HEAPU8: Uint8Array;
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, "..");
@@ -28,7 +45,7 @@ const HOLDOUT_PATH = resolve(ROOT, "browser/public/benchmarks/tinystories-eval.j
 
 console.log("[score] loading WASM module…");
 const { default: createTinyGPT } = await import(WASM_JS);
-const M = await createTinyGPT();
+const M: TinyGPTModule = await createTinyGPT();
 
 const N = "number";
 const tgModelCreate = M.cwrap("tg_model_create", N, [N, N, N, N, N, N, N]);
@@ -40,13 +57,19 @@ const tgImportState = M.cwrap("tg_import_state", null, [N, N]);
 
 // Read the holdout text — we score all stories joined into one corpus.
 console.log("[score] reading TinyStories holdout…");
-const holdout = JSON.parse(await fs.readFile(HOLDOUT_PATH, "utf8"));
+interface HoldoutFile {
+  source: string;
+  count: number;
+  totalBytes: number;
+  stories: string[];
+}
+const holdout: HoldoutFile = JSON.parse(await fs.readFile(HOLDOUT_PATH, "utf8"));
 const holdoutText = holdout.stories.join("\n\n");
 const holdoutBytes = new TextEncoder().encode(holdoutText);
 console.log(`[score] holdout: ${holdout.stories.length} stories, ${holdoutBytes.length} bytes`);
 
 // Read existing manifest. We'll merge scores in.
-const manifest = JSON.parse(await fs.readFile(MANIFEST_PATH, "utf8"));
+const manifest: GalleryManifest = JSON.parse(await fs.readFile(MANIFEST_PATH, "utf8"));
 
 // Inputs we want to score, by gallery id. Each maps to a canonical
 // .tinygpt at the file path below.
@@ -57,8 +80,27 @@ console.log(`[score] found ${tinygptFiles.length} canonical .tinygpt files:`,
 
 const MAGIC = "TGPT";
 
+/// .tinygpt header subset we actually consult here. The full schema is
+/// the source-of-truth one in `native-mac/Sources/TinyGPTIO/Manifest.swift` —
+/// we only need the geometry + dtype check.
+interface TinygptHeaderConfig {
+  layers?: number;
+  dModel?: number;
+  ctx?: number;
+  heads?: number;
+  dMlp?: number;
+}
+interface TinygptHeader {
+  config: TinygptHeaderConfig;
+  weightDtype?: string;
+}
+interface ParsedTinygpt {
+  config: TinygptHeaderConfig;
+  stateBytes: Uint8Array;
+}
+
 /// Parse a .tinygpt file: returns { config, stateBytes }.
-function parseTinygpt(buf) {
+function parseTinygpt(buf: ArrayBuffer): ParsedTinygpt {
   if (buf.byteLength < 12) throw new Error("file too small");
   const magic = new TextDecoder().decode(new Uint8Array(buf, 0, 4));
   if (magic !== MAGIC) throw new Error(`bad magic: ${magic}`);
@@ -70,14 +112,14 @@ function parseTinygpt(buf) {
   const headerLen = dv.getUint32(8, true);
   if (12 + headerLen > buf.byteLength) throw new Error("malformed header");
   const headerJson = new TextDecoder().decode(new Uint8Array(buf, 12, headerLen));
-  const header = JSON.parse(headerJson);
+  const header: TinygptHeader = JSON.parse(headerJson);
   // The state buffer starts right after the header. Canonical files use
   // [int32 step + per-tensor [w_fp32, m_fp32, v_fp32]] which is exactly
   // what tg_import_state expects.
   const stateBytes = new Uint8Array(buf.slice(12 + headerLen));
   if (header.weightDtype && header.weightDtype !== "fp32") {
     throw new Error(
-      `score_gallery.mjs only handles canonical fp32 .tinygpt files; ` +
+      `score_gallery.ts only handles canonical fp32 .tinygpt files; ` +
       `this one has weightDtype=${header.weightDtype}. Use the file from ` +
       `data/gallery/, not browser/public/gallery/.`,
     );
@@ -86,7 +128,7 @@ function parseTinygpt(buf) {
 }
 
 /// Eval the model on the held-out corpus and return perplexity.
-function evalPerplexity(handle, batchSize, nBatches) {
+function evalPerplexity(handle: WasmHandle, batchSize: number, nBatches: number) {
   // tg_set_data installs the holdout as the corpus. train_frac = 0.0
   // pushes 100% of the corpus into the val split, so tg_eval(..., split=1)
   // samples from the entire held-out set.
@@ -104,20 +146,25 @@ function evalPerplexity(handle, batchSize, nBatches) {
 }
 
 const benchId = "tinystories-ppl";
-const updated = [];
+interface ScoreUpdate {
+  id: string;
+  score: number | null;
+  details: { error?: string; loss?: number; vocab?: number; batches?: number; tokens?: number };
+}
+const updated: ScoreUpdate[] = [];
 
 for (const filename of tinygptFiles.sort()) {
   const id = filename.replace(/\.tinygpt$/, "");
   const path = resolve(GALLERY_DIR, filename);
   console.log(`\n[score] === ${id} ===`);
   try {
-    const buf = (await fs.readFile(path)).buffer;
+    const buf = (await fs.readFile(path)).buffer as ArrayBuffer;
     const { config, stateBytes } = parseTinygpt(buf);
     console.log(`        config: ${config.layers}L · d=${config.dModel} · ctx=${config.ctx} · ${stateBytes.length} state bytes`);
 
     // Create model with matching geometry. The 7-arg signature is:
     //   tg_model_create(vocab, ctx, layers, heads, d_model, d_mlp, seed)
-    const handle = tgModelCreate(
+    const handle: WasmHandle = tgModelCreate(
       256, // vocab — gallery models are byte-level
       config.ctx ?? 256,
       config.layers ?? 12,
@@ -148,25 +195,33 @@ for (const filename of tinygptFiles.sort()) {
 
     tgModelFree(handle);
 
-    updated.push({ id, score: perplexity, details: { loss, vocab: 256, batches: 32, tokens: 32 * 8 * (config.ctx ?? 256) } });
+    updated.push({
+      id, score: perplexity,
+      details: { loss, vocab: 256, batches: 32, tokens: 32 * 8 * (config.ctx ?? 256) },
+    });
   } catch (e) {
-    console.error(`[score] FAIL ${id}: ${e.message}`);
-    updated.push({ id, score: null, details: { error: e.message } });
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[score] FAIL ${id}: ${msg}`);
+    updated.push({ id, score: null, details: { error: msg } });
   }
 }
 
 // Merge into manifest. Each manifest entry whose id matches gets its
-// benchmarks.<benchId> set; unknown ids in `updated` are appended as new
-// rows (so newly-trained models that haven't been published to the
-// gallery yet still appear on the leaderboard).
+// benchmarks.<benchId> set; unknown ids in `updated` are appended as
+// new rows (so newly-trained models that haven't been published to
+// the gallery yet still appear on the leaderboard).
 console.log("\n[score] merging scores into manifest…");
-const byId = new Map((manifest.models || []).map((m) => [m.id, m]));
+const byId = new Map<string, GalleryModel>((manifest.models || []).map((m) => [m.id, m]));
 for (const { id, score } of updated) {
   let entry = byId.get(id);
   if (!entry) {
-    // Bootstrap a minimal stub. The next finalize_gallery.mjs run will
+    // Bootstrap a minimal stub. The next finalize_gallery run will
     // overwrite with full metadata.
-    entry = { id, name: id, benchmarks: {}, submission: { featured: false } };
+    entry = {
+      id, name: id, file: `${id}.bin`,
+      benchmarks: {},
+      submission: { author: "TinyGPT", submittedAt: new Date().toISOString(), featured: false },
+    };
     manifest.models = manifest.models || [];
     manifest.models.push(entry);
   }
@@ -182,8 +237,8 @@ console.log("   id                   score (ppl)   loss");
 console.log("   ───────────────────  ───────────   ─────");
 for (const { id, score, details } of updated) {
   if (score == null) {
-    console.log(`   ${id.padEnd(20)} ERROR  ${details?.error}`);
+    console.log(`   ${id.padEnd(20)} ERROR  ${details.error ?? ""}`);
   } else {
-    console.log(`   ${id.padEnd(20)} ${score.toFixed(2).padStart(10)}    ${details?.loss?.toFixed(3) ?? "—"}`);
+    console.log(`   ${id.padEnd(20)} ${score.toFixed(2).padStart(10)}    ${details.loss?.toFixed(3) ?? "—"}`);
   }
 }

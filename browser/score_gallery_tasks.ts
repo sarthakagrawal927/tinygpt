@@ -7,11 +7,13 @@
 // the evaluation loop (greedy generate per trial) and the score
 // definition (exact-match accuracy %).
 //
-// Run:  node browser/score_gallery_tasks.mjs
+// Run:  node browser/score_gallery_tasks.ts
 
 import { promises as fs } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import type { GalleryManifest } from "./src/gallery-schema.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, "..");
@@ -113,7 +115,7 @@ function scoreTask(handle, trials) {
   return { score: (correct / trials.length) * 100, correct, total: trials.length, failures };
 }
 
-const manifest = JSON.parse(await fs.readFile(MANIFEST_PATH, "utf8"));
+const manifest: GalleryManifest = JSON.parse(await fs.readFile(MANIFEST_PATH, "utf8"));
 const files = (await fs.readdir(GALLERY_DIR)).filter((f) => f.endsWith(".tinygpt")).sort();
 
 const sortTrials = buildSort6Trials();

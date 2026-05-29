@@ -76,40 +76,40 @@ await page.goto(APP_URL, { waitUntil: "networkidle" });
 await page.locator("#welcomeSkip").click({ timeout: 1500 }).catch(() => {});
 
 await page.evaluate((text) => {
-  const el = document.getElementById("corpus");
+  const el = document.getElementById("corpus") as HTMLTextAreaElement;
   el.value = text;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }, corpus);
-const corpusLen = await page.evaluate(() => document.getElementById("corpus").value.length);
+const corpusLen = await page.evaluate(() => (document.getElementById("corpus") as HTMLTextAreaElement).value.length);
 // Textarea silently strips some bytes (NULs, lone surrogates, weird control chars).
 // Tolerate up to 5% loss — for a 1.2MB corpus that's plenty of training data.
 if (corpusLen < corpus.length * 0.95) throw new Error(`corpus truncated badly: got ${corpusLen}/${corpus.length}`);
 if (corpusLen < corpus.length) console.log(`[${args.out}] corpus normalized by textarea: ${corpus.length} -> ${corpusLen} (${((1 - corpusLen/corpus.length) * 100).toFixed(2)}% stripped)`);
 
 await page.evaluate(({ preset, steps }) => {
-  const setVal = (id, v) => {
-    const el = document.getElementById(id);
+  const setVal = (id: string, v: number | string) => {
+    const el = document.getElementById(id) as HTMLInputElement;
     el.value = String(v);
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
   };
-  document.getElementById("sizePreset").value = preset;
-  document.getElementById("sizePreset").dispatchEvent(new Event("change", { bubbles: true }));
+  (document.getElementById("sizePreset") as HTMLSelectElement).value = preset;
+  document.getElementById("sizePreset")!.dispatchEvent(new Event("change", { bubbles: true }));
   setVal("maxSteps", steps);
   setVal("lr", 0.0003);
-  const back = document.getElementById("backend");
+  const back = document.getElementById("backend") as HTMLSelectElement;
   back.value = "webgpu";
   back.dataset.userPicked = "1";
   back.dispatchEvent(new Event("change", { bubbles: true }));
-  const seed = document.getElementById("seed");
+  const seed = document.getElementById("seed") as HTMLInputElement | null;
   if (seed) setVal("seed", 42);
 }, { preset: PRESET, steps: STEPS });
 
 const cfg = await page.evaluate(() => ({
-  preset: document.getElementById("sizePreset").value,
-  maxSteps: document.getElementById("maxSteps").value,
-  backend: document.getElementById("backend").value,
+  preset: (document.getElementById("sizePreset") as HTMLSelectElement).value,
+  maxSteps: (document.getElementById("maxSteps") as HTMLInputElement).value,
+  backend: (document.getElementById("backend") as HTMLSelectElement).value,
 }));
 console.log(`[${args.out}] config:`, JSON.stringify(cfg));
 
@@ -170,15 +170,15 @@ try {
   console.log(`[${args.out}] --- generating sample ---`);
   await page.waitForFunction(
     () => {
-      const btn = document.getElementById("sample");
+      const btn = document.getElementById("sample") as HTMLButtonElement | null;
       return btn && !btn.disabled;
     },
     null,
     { timeout: 120_000 },
   );
   await page.evaluate((p) => {
-    const setVal = (id, v) => {
-      const el = document.getElementById(id);
+    const setVal = (id: string, v: number | string) => {
+      const el = document.getElementById(id) as HTMLInputElement | null;
       if (!el) return;
       el.value = String(v);
       el.dispatchEvent(new Event("input", { bubbles: true }));
