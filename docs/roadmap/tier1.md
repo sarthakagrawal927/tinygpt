@@ -67,7 +67,7 @@ of code. The least-effort biggest-impact one-line trick of 2024.
 
 **Effort:** ~half day. **ROI: very high per minute spent.**
 
-## 1.7 Gradient checkpointing ⬜
+## 1.7 Gradient checkpointing 🟢
 
 Don't save every layer's activations during forward; re-compute them
 during backward. Trade ~30% extra compute for ~√L activation memory

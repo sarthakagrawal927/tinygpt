@@ -12,7 +12,7 @@ access to a strong local judge.
 
 **Effort:** ~3 days. **ROI: low for us (no strong local judge).**
 
-## 3.2 GPTQ quantization (from-scratch) ⬜
+## 3.2 GPTQ quantization (from-scratch) 🟢
 
 Layer-by-layer int4 quantization using Hessian information.
 Marginally better than MLX's built-in `quantize`; the diff is ~1-2%
@@ -20,7 +20,7 @@ perplexity.
 
 **Effort:** ~3 days. **ROI: low (diminishing returns).**
 
-## 3.3 SmoothQuant ⬜
+## 3.3 SmoothQuant 🟢
 
 Equalize activation/weight magnitudes before int8 quantization for
 cleaner calibration. Less relevant since modern int4 methods (HQQ,
@@ -28,7 +28,7 @@ LoftQ) work without this preprocessing.
 
 **Effort:** ~2 days. **ROI: low.**
 
-## 3.4 Quantization-aware training (QAT) ⬜
+## 3.4 Quantization-aware training (QAT) 🟢
 
 During training, simulate int4 quantization in the forward (with
 straight-through estimator gradients). Model learns to be quantization-
@@ -36,7 +36,7 @@ robust. ~2-3% better post-quantization perplexity vs PTQ.
 
 **Effort:** ~3 days. **ROI: low at our scale.**
 
-## 3.5 Pruning (unstructured) ⬜
+## 3.5 Pruning (unstructured) 🟢
 
 Zero out the smallest weights. 50% sparsity often retainable. But
 Mac/browser GPUs don't efficiently exploit unstructured sparsity —
@@ -44,7 +44,7 @@ runtime savings are marginal vs quantization.
 
 **Effort:** ~2 days. **ROI: low.**
 
-## 3.6 Structured pruning (head/layer removal) ⬜
+## 3.6 Structured pruning (head/layer removal) 🟢
 
 Remove whole attention heads or layers. Real speedup (vs unstructured's
 marginal). 10-20% smaller. Tricky because removed pieces cascade.
@@ -77,7 +77,7 @@ for 80-90% of the quality lift.
 
 **Effort:** ~1 week. **ROI: low — DPO does the job.**
 
-## 3.10 Medusa-style speculative decoding ⬜
+## 3.10 Medusa-style speculative decoding 🟢
 
 Speculative decoding where the model has extra "Medusa heads"
 predicting future tokens directly. No separate draft model, but
@@ -86,7 +86,7 @@ is simpler.)
 
 **Effort:** ~3 days. **ROI: low.**
 
-## 3.11 EAGLE-2 (better speculative decoding) ⬜
+## 3.11 EAGLE-2 (better speculative decoding) 🟢
 
 2024 variant of speculative decoding with 2-3× higher acceptance
 rates than vanilla. Uses the target model's hidden states (not just
@@ -121,7 +121,7 @@ skip layers entirely). Saves compute on "easy" tokens. Recent
 
 **Effort:** ~3 days. **ROI: low-medium.**
 
-## 3.15 LayerDrop ⬜
+## 3.15 LayerDrop 🟢
 
 Randomly skip layers during training; at inference, optionally use
 fewer layers for faster decode. Mild regularizer + post-hoc model
@@ -137,7 +137,7 @@ Closes some of the gap between LoRA and full fine-tune.
 
 **Effort:** ~2 days. **ROI: low-medium.**
 
-## 3.17 AdaLoRA ⬜
+## 3.17 AdaLoRA 🟢
 
 Adaptive rank assignment — automatically allocates higher rank to
 layers that need it, lower to layers that don't. Slightly better
@@ -152,7 +152,7 @@ is ~16× larger). ~5-10% quality improvement at zero memory cost.
 
 **Effort:** ~half day. **ROI: medium-low.**
 
-## 3.19 PISSA initialization ⬜
+## 3.19 PISSA initialization 🟢
 
 LoRA initialized using the principal singular vectors of the base
 weight (instead of random). Faster convergence — sometimes 2× faster
@@ -160,14 +160,14 @@ to reach the same loss.
 
 **Effort:** ~1 day. **ROI: medium-low.**
 
-## 3.20 LoRA-FA (frozen A) ⬜
+## 3.20 LoRA-FA (frozen A) 🟢
 
 Train only B in LoRA; freeze A. Half the params, ~80% of the
 quality. Useful when memory is extreme.
 
 **Effort:** ~half day. **ROI: low.**
 
-## 3.21 RsLoRA (rank-stabilized LoRA) ⬜
+## 3.21 RsLoRA (rank-stabilized LoRA) 🟢
 
 Different scaling for the LoRA delta (`α/√r` instead of `α/r`).
 Improves quality at high ranks (r > 64) where standard LoRA scaling

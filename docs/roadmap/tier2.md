@@ -28,7 +28,7 @@ at the same rank. See [`docs/lora_guide.md`](../lora_guide.md).
 
 **Effort:** ~1 day. **ROI: medium (free quality on every fine-tune).**
 
-## 2.4 GaLore (Gradient Low-Rank Projection) ⬜
+## 2.4 GaLore (Gradient Low-Rank Projection) 🟢
 
 Projects gradients to a low-rank subspace before applying the
 optimizer; same memory as LoRA but performs full fine-tuning (all
@@ -37,7 +37,7 @@ where LoRA is too restrictive.
 
 **Effort:** ~1.5 days. **ROI: medium-high — full-finetune at LoRA cost.**
 
-## 2.5 VeRA (Vector-based Random Adapters) ⬜
+## 2.5 VeRA (Vector-based Random Adapters) 🟢
 
 LoRA variant with frozen random projection matrices and trainable
 diagonal scalars only. ~10× smaller adapter than LoRA; comparable
@@ -45,7 +45,7 @@ quality on most tasks.
 
 **Effort:** ~1 day. **ROI: medium (extreme adapter-size compression).**
 
-## 2.6 LoftQ (LoRA-Friendly Quantization) ⬜
+## 2.6 LoftQ (LoRA-Friendly Quantization) 🟢
 
 Initialize LoRA adapters to compensate for the quantization error
 of the base — A and B are chosen so `A·B` approximates the original
@@ -87,7 +87,7 @@ well.
 
 **Effort:** ~1 day. **ROI: medium.**
 
-## 2.11 KV cache quantization (KIVI) ⬜
+## 2.11 KV cache quantization (KIVI) 🟢
 
 Compress K and V tensors in the KV cache to int8 or int4. At long
 contexts, the cache is what runs out of memory. KIVI (2024) is a
@@ -114,7 +114,7 @@ config; setting `nKvHeads: 1` activates MQA.
 
 **Effort:** zero. **ROI: free.**
 
-## 2.14 Streaming-LLM attention sink ⬜
+## 2.14 Streaming-LLM attention sink 🟢
 
 Keep the first 4 tokens permanently in attention, then slide a window
 over the rest. Enables infinite-context streaming without quality
