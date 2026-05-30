@@ -2,6 +2,21 @@ import Foundation
 import MLX
 import MLXNN
 
+// AUDIT FLAG: Pruning — unstructured + structured-head are FLAGGED.
+//   Structured layer pruning is KEEP (real wallclock win).
+//
+// Tested: 50% unstructured prune on Shakespeare gallery — loss 1.27 →
+//   1.32, sample stays coherent. 4/8 head zero-out per layer — loss
+//   1.27 → 2.81 (degrades). 2/12 layer drop → 9.6M → 8.0M params,
+//   coherent.
+// Saw: unstructured pruning has NO wallclock benefit (Metal has no
+//   sparse matmul). Head pruning is shape-preserving (zero-out only);
+//   no actual memory or wallclock savings. ONLY structured-layer
+//   pruning actually changes topology.
+// When unstructured would help: post-gzip distribution size (-38%).
+// When head zero-out would help: as a precursor to physical-removal
+//   (queued ~200 LOC follow-up).
+
 /// Pruning utilities — both unstructured (magnitude masks on individual
 /// weights) and structured (drop whole heads or whole layers).
 ///

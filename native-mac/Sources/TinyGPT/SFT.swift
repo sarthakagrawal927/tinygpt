@@ -34,7 +34,10 @@ enum SFT {
         var nefTuneAlpha: Float = 0
         var gradClipNorm: Float = 1.0
         var loraPlusRatio: Float = 1.0
-        var useDora: Bool = false
+        // Curated-recipe default: DoRA on. 5-10% better than vanilla LoRA
+        // at same rank for a modest compute cost. Pass `--no-dora` to fall
+        // back to vanilla LoRA. See docs/audit_2026.md "PEFT — KEEP".
+        var useDora: Bool = true
         var packSequences = false
         var optimizerKind: OptimizerKind = .adamw
         // PEFT variants — see Finetune.swift / docs/peft_variants.md.
@@ -69,6 +72,7 @@ enum SFT {
             case "--pack-mode":     packMode = args[i+1]; i += 2
             case "--length-bucket": lengthBuckets = Int(args[i+1]) ?? lengthBuckets; i += 2
             case "--dora":          useDora = true; i += 1
+            case "--no-dora":       useDora = false; i += 1
             case "--vera":          peftVariant = .vera; i += 1
             case "--rs-lora":       peftVariant = .rsLora; i += 1
             case "--lora-fa":       peftVariant = .loraFA; i += 1

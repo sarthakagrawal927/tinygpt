@@ -2,6 +2,19 @@ import Foundation
 import MLX
 import TinyGPTIO
 
+// AUDIT FLAG: GPTQ from-scratch worker — see Sources/TinyGPT/GPTQ.swift.
+//   (THIS file — GPTQReader for LOADING HF GPTQ models — is KEEP.)
+//
+// Tested: 4-bit GPTQ on flagship. 72 tensors quantised in 31s.
+//   Relative reconstruction error 0.1064 (normal for int4).
+//   Resulting file loads + samples without error.
+// Saw: works. But AWQReader covers the common case of loading
+//   already-quantised HF models. From-scratch GPTQ is for OWN-model
+//   export to int4, which we rarely need (we'd ship via AWQ).
+// When this would help: when you want to export your trained tinygpt
+//   model to int4 for distribution; AWQ produces slightly different
+//   results, GPTQ may win on some models.
+
 /// GPTQ-quantised HF safetensors reader (Frantar et al., 2022).
 ///
 /// GPTQ stores a Linear's weight as four tensors instead of one. The

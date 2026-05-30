@@ -51,7 +51,12 @@ enum DPO {
         var gradClipNorm: Float = 1.0
         var loraPlusRatio: Float = 1.0
         var useDora: Bool = false
-        var lossType: LossType = .dpo
+        // Curated-recipe default: SimPO (reference-free, ½ the memory of
+        // DPO at equivalent quality on published benchmarks). Override with
+        // `--loss-type dpo` for the classical recipe, `--loss-type orpo`
+        // for SFT+DPO in one pass, or `--loss-type kto` for single-side
+        // (thumbs up/down) preference data.
+        var lossType: LossType = .simpo
         // SimPO's reward-margin γ (paper recommends 1.0; loss is sensitive).
         var simpoGamma: Float = 1.0
         // ORPO's preference-term weight λ (paper recommends 0.1).

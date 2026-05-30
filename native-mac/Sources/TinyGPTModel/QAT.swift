@@ -2,6 +2,17 @@ import Foundation
 import MLX
 import MLXNN
 
+// AUDIT FLAG: Quantization-Aware Training (QAT, int4/int8).
+//
+// Tested: 30-step training. int4: loss 5.898→3.292, qat-err 0.07.
+//   int8: loss 6.428→3.228, qat-err 0.004. ~10% step-time overhead.
+// Saw: fake-quant + straight-through estimator working correctly.
+// When this would help: when we have an int4 / int8 INFERENCE matmul
+//   kernel — QAT only matters if you actually deploy to int-precision.
+//   Without that kernel, training a model to handle quantization
+//   noise it'll never see at deployment.
+// Default recipe doesn't enable QAT. Available via --qat int4|int8.
+
 /// Quantization-Aware Training (QAT) — fake-quant + straight-through-
 /// estimator (STE) primitive used by the modified TransformerBlock /
 /// TransformerBlockHF forwards when `cfg.qatBits` is set.

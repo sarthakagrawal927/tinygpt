@@ -3,6 +3,19 @@ import MLX
 import MLXNN
 import MLXOptimizers
 
+// AUDIT FLAG: Optimizer alternatives (Lion, Sophia, Muon, Adafactor).
+//
+// Tested: 200 steps tiny preset; Adafactor also briefly at huge B=2.
+// Saw: Lion lagged AdamW (3.18 vs 2.62 loss). Sophia ~marginal. Muon
+//   5.2 vs 16.3 step/s (Newton-Schulz overhead dominated). Adafactor
+//   2× slower per step; ⅓ optimizer-state memory irrelevant at 22M-100M.
+// When this would help:
+//   - Lion at 1k+ steps where sign-based update reportedly blooms
+//   - Sophia with the full Gauss-Newton variant (we ship "light")
+//   - Muon at 1.5B+ where matmul cost dwarfs Newton-Schulz overhead
+//   - Adafactor for training models so large that optimizer state matters
+// Default recipe uses AdamW. Available via --optimizer X.
+
 /// Drop-in optimizer alternatives to AdamW.
 ///
 /// MLX-Swift already ships AdamW, Lion, and Adafactor; the project also

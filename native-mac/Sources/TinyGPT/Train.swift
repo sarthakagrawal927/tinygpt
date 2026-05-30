@@ -12,8 +12,8 @@ import TinyGPTModel
 ///   --save-every N              Atomic checkpoint every N steps. A crash
 ///                               leaves the last successful checkpoint
 ///                               intact (write-to-.tmp then rename).
-///   --lr-schedule cosine        Linear warmup + cosine decay.
-///   --warmup N                  Warmup steps (default 0 — constant LR).
+///   --lr-schedule cosine        Linear warmup + cosine decay (default).
+///   --warmup N                  Warmup steps (default 500 — standard).
 ///   --max-lr / --min-lr         Cosine endpoints (defaults 3e-4 / 3e-5).
 ///   --val-split 0.0-0.2         Hold out last fraction of corpus for val.
 ///   --val-every N               Eval val loss every N steps (default 200).
@@ -47,14 +47,20 @@ enum Train {
         var steps = 500
         var corpusPath: String? = nil
         var outPath: String? = nil
-        var dtype = "float32"
+        // Curated-recipe default: bf16 — better range than fp16, ½ memory
+        // of fp32, matches modern decoder-only training norms (Llama, Qwen,
+        // Mistral). Override with `--dtype float32` for strict reproducibility
+        // tests or `--dtype float16` for hardware that lacks bf16.
+        var dtype = "bfloat16"
         var batchSize: Int? = nil
         var sampleEvery = 100
         // Tier 0 additions:
         var resumePath: String? = nil
         var saveEvery: Int? = nil
-        var lrSchedule = "constant"
-        var warmupSteps: Int = 0
+        // Curated-recipe default: cosine + warmup 500. Standard transformer
+        // schedule; constant LR is rarely the right choice past a smoke test.
+        var lrSchedule = "cosine"
+        var warmupSteps: Int = 500
         var maxLR: Float = 3e-4
         var minLR: Float = 3e-5
         var valSplit: Double = 0
@@ -331,7 +337,16 @@ enum Train {
             cfg.useYOCO = useYOCO
             // Gradient checkpointing — must be set BEFORE the model is
             // built so each TransformerBlock picks it up at init time.
-            cfg.useGradCheckpoint = useGradCheckpoint
+            //
+            // Curated-recipe default: auto-enable for mega/behemoth/titan
+            // presets (100M+ params, where activation memory becomes the
+            // bottleneck). Tiny/small/huge train fine without it; enabling
+            // would just slow them down ~30% for no memory benefit.
+            // Override with explicit `--grad-checkpoint` at any preset, or
+            // (not supported as a flag) — to disable on mega+, the user
+            // would need to pass `--no-grad-checkpoint` if we ever ship one.
+            let autoGradCkpt = ["mega", "behemoth", "titan"].contains(preset)
+            cfg.useGradCheckpoint = useGradCheckpoint || autoGradCkpt
             // Training-stability bells (Tier 2). Architectural flags
             // (DeepNorm scaling + embedding RMSNorm) MUST be set before
             // the model is built — they change init / layer wiring.
@@ -954,12 +969,18 @@ enum Train {
         print("""
         usage: tinygpt train [options]
 
+        The curated default recipe trains a stable, modern transformer with
+        sensible choices baked in (bfloat16 + cosine LR + warmup + gradient
+        clipping + auto grad-checkpoint on mega+ presets). Most users only
+        need to set --preset, --corpus, --steps, and --out. Other flags are
+        for fine-grained control or experimentation; see --help-experimental.
+
         Core:
           --preset tiny|small|huge|mega|behemoth|titan   (default: tiny)
           --steps N                       Training steps (default: 500)
           --corpus path.txt               UTF-8 text file (default: random bytes)
           --out path.tinygpt              Where to save the trained checkpoint
-          --dtype float32|float16         Training dtype (default: float32)
+          --dtype bfloat16|float32|float16  Training dtype (default: bfloat16)
           --batch N                       Batch size (default: by preset)
           --sample-every N                Print a sample every N steps (default: 100)
           --tokenizer <hf-dir>            Use BPE/SentencePiece from a HF model dir
@@ -1051,8 +1072,8 @@ enum Train {
           --resume <path.tinygpt>         Continue from a saved checkpoint
                                            (Adam state restarts — 100-step warmup)
           --save-every N                  Atomic checkpoint every N steps
-          --lr-schedule constant|cosine   (default: constant)
-          --warmup N                      Warmup steps (default: 0)
+          --lr-schedule constant|cosine   (default: cosine — standard recipe)
+          --warmup N                      Warmup steps (default: 500 when cosine)
           --max-lr / --min-lr             Cosine endpoints (defaults: 3e-4 / 3e-5)
           --val-split 0.0-0.2             Hold out last fraction of corpus for val
           --val-every N                   Eval val loss every N steps (default: 200)

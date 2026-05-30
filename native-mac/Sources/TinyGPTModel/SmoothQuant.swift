@@ -2,6 +2,18 @@ import Foundation
 import MLX
 import MLXNN
 
+// AUDIT FLAG: SmoothQuant (Xiao et al., 2022).
+//
+// Tested: calibration pass + W·diag(s) rewrite. Outlier activation
+//   channels collapse correctly; pure-float matmul output preserved
+//   bit-identically (1e-6 roundoff).
+// Saw: algorithmic infrastructure shipped. ZERO runtime payoff today
+//   because MLX-Swift has no int8 matmul kernel — without that, the
+//   scaled weights run at fp32 just like un-scaled.
+// When this would help: when MLX-Swift ships int8 matmul OR when we
+//   export the scaled model to a downstream runtime (llama.cpp,
+//   mlx-lm) that has the kernel.
+
 /// SmoothQuant (Xiao et al., 2022) — pre-quantization activation smoothing.
 ///
 /// The problem SmoothQuant solves: activations into a Linear are often

@@ -3,6 +3,21 @@ import MLX
 import MLXNN
 import MLXRandom
 
+// AUDIT FLAG: GaLore (Zhao et al., 2024) — gradient low-rank projection.
+//
+// Tested: 100-step runs. Implementation projects gradients to rank-R
+//   subspace before optimizer, refreshes basis periodically.
+// Saw: loss descends (algorithm correct). But the claimed memory
+//   savings are NOT realized — MLX-Swift's AdamW keeps m, v at full
+//   param shape; we only project the gradient. The "memory matches
+//   LoRA r=R" claim is theoretical.
+// When this would help: when we replace AdamW with a low-rank-state
+//   subclass (queued as follow-up); or for users who care about the
+//   projection dynamics (small effect even there).
+//
+// Default recipe doesn't enable GaLore. Available via --galore-rank R.
+
+
 /// GaLore — Gradient Low-Rank Projection (Zhao et al., 2024;
 /// https://arxiv.org/abs/2403.03507).
 ///

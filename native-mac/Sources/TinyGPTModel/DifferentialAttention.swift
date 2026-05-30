@@ -3,6 +3,16 @@ import MLX
 import MLXNN
 import MLXFast
 
+// AUDIT FLAG: Differential Attention (Ye et al., 2024).
+//
+// Tested: smoke train at 22M params, vanilla data.
+// Saw: no measured benefit. Doubled Q/K projections (cost) for no
+//   measured quality lift at our scale.
+// When this would help: paper demonstrates gains at >100M params on
+//   long-context reasoning. Probably real at frontier scale; invisible
+//   at small.
+// Default recipe uses vanilla attention. Available via --diff-attn.
+
 /// Differential Attention (Ye et al., 2024 — "DIFF Transformer:
 /// Differential Transformer", arXiv:2410.05258).
 ///
