@@ -140,6 +140,30 @@ public struct ModelConfig: Sendable, Equatable {
     public var streamingSink: Int?
     public var streamingWindow: Int?
 
+    /// Speculative-decode head configuration (Medusa / EAGLE-2). When a
+    /// `.heads` sidecar is loaded at sample time this carries the head
+    /// architecture so the verify path can rebuild it. The fields live
+    /// only in memory — the .tinygpt manifest stays untouched (heads
+    /// are a SIDECAR, not baked into the base checkpoint), so older
+    /// readers round-trip unchanged. See `MedusaHeads.swift` /
+    /// `EagleDraft.swift` for the head modules themselves.
+    public struct SpeculativeHeadConfig: Sendable, Equatable {
+        public enum Kind: String, Sendable, Equatable { case medusa, eagle }
+        public var kind: Kind
+        /// Number of look-ahead steps the heads cover. Medusa: N independent
+        /// heads predicting offsets 1..N. EAGLE-2: 1 auto-regressive draft
+        /// net unrolled N times.
+        public var numHeads: Int
+        /// Hidden width for the head's internal projection. Defaults to
+        /// `dModel` so the head's residual block stays well-sized.
+        public var hiddenDim: Int
+        public init(kind: Kind, numHeads: Int, hiddenDim: Int) {
+            self.kind = kind
+            self.numHeads = max(1, numHeads)
+            self.hiddenDim = max(8, hiddenDim)
+        }
+    }
+
     // MARK: - Training-stability bells (Tier 2)
     //
     // The five knobs below are TRAINING-TIME features; they don't

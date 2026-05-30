@@ -27,6 +27,14 @@ struct TinyGPT {
             Score.run(args: Array(args.dropFirst()))
             return
         }
+        // Same pre-switch shim pattern for `train-heads` — see the merge
+        // TODO note next to `tuned-lens` in the switch below. Other agents
+        // are concurrently touching this switch; we ship the shim to keep
+        // the surface area testable until the speculative-heads PR lands.
+        if cmd == "train-heads" {
+            TrainHeads.run(args: Array(args.dropFirst()))
+            return
+        }
         // TODO(score-bench-merge): once review is happy, move the dispatch
         // for `score-bench` into the case below (next to `case "eval":`)
         // and delete the pre-switch shim above.
@@ -72,6 +80,12 @@ struct TinyGPT {
             Magpie.run(args: Array(args.dropFirst()))
         case "tuned-lens":
             TunedLens.run(args: Array(args.dropFirst()))
+        // TODO(train-heads-merge): wire up `tinygpt train-heads` once the
+        // speculative-heads PR (MedusaHeads.swift / EagleDraft.swift /
+        // TrainHeads.swift) is merged. Until then a manual case here would
+        // race other agents touching this switch — see HANDOFF.md.
+        //   case "train-heads":
+        //       TrainHeads.run(args: Array(args.dropFirst()))
         case "compare":
             Compare.run(args: Array(args.dropFirst()))
         case "hf-inspect":

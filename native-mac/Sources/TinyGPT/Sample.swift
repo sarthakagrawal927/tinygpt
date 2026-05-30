@@ -25,6 +25,13 @@ enum Sample {
         var prefixCachePath: String? = nil // path to load/save prompt KV cache
         var streamingSink: Int? = nil
         var streamingWindow: Int? = nil
+        // Speculative-decode HEADS (Medusa / EAGLE-2). When --heads is set,
+        // we route generation through the joint-head verification path
+        // instead of the standard per-token decode loop. See
+        // `MedusaHeads.swift` / `EagleDraft.swift` for the head modules
+        // and `TrainHeads.swift` for how a `.heads` sidecar is produced.
+        var headsPath: String? = nil
+        var headType: String = "medusa"
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -78,6 +85,12 @@ enum Sample {
             case "--streaming-llm-window":
                 guard i + 1 < args.count else { exitUsage() }
                 streamingWindow = Int(args[i + 1]); i += 2
+            case "--heads":
+                guard i + 1 < args.count else { exitUsage() }
+                headsPath = args[i + 1]; i += 2
+            case "--head-type":
+                guard i + 1 < args.count else { exitUsage() }
+                headType = args[i + 1].lowercased(); i += 2
             case "-h", "--help":
                 exitUsage()
             default:
@@ -205,7 +218,9 @@ enum Sample {
         // correct absolute-position offset and respects GQA K/V head
         // counts (see KVCacheHF.swift).
         // Spec-decode disables KV caching for now (mismatched forward shape).
-        let useActualCache = useKVCache && draftModel == nil
+        // Heads decode also bypasses the cache — verify pass re-processes
+        // the whole prefix + N proposed tokens in a single forward.
+        let useActualCache = useKVCache && draftModel == nil && headsPath == nil
         // Map CLI flag to either MLX DType (fp16/bf16) for cheap downcast
         // storage, or to KIVI config (int8/int4) for the affine-quantised
         // per-channel-K / per-token-V path. Mutually exclusive — KIVI
@@ -286,7 +301,103 @@ enum Sample {
             }
             fflush(stdout)
         }
-        if let draft = draftModel {
+        if let headsPath = headsPath {
+            // Speculative decoding with JOINT-TRAINED HEADS (Medusa / EAGLE-2).
+            // The base model proposes a hidden state; the heads turn that
+            // into N additional speculative tokens; the base verifies all
+            // N+1 candidates in one forward pass. Lossless wrt the base's
+            // own argmax (greedy verify rule); speedup proportional to
+            // acceptance rate, which is a function of head quality.
+            //
+            // The heads path requires direct access to the base's hidden
+            // state + LM head, which our HF wrapper doesn't yet expose —
+            // restrict to from-scratch models in this first cut. The
+            // architecture itself is base-agnostic; extending requires
+            // adding `forwardToHidden` / `applyLMHead` to the HF model.
+            guard case .fromScratch(let baseModel) = model else {
+                fputs("--heads currently only works with from-scratch byte-level models.\n", stderr)
+                exit(2)
+            }
+            if temperature > 0 {
+                fputs("note: --heads forces greedy (temperature ignored)\n", stderr)
+            }
+            // Lift the model's hidden + LM head into closures we can pass
+            // into the verify path. Each is a single forward through the
+            // already-built model; nothing fancy.
+            let baseHidden: (MLXArray) -> MLXArray = { x in baseModel.forwardToHidden(x) }
+            let baseLogits: (MLXArray) -> MLXArray = { x in baseModel(x) }
+            let baseLMHead: (MLXArray) -> MLXArray = { h in
+                if let lmHead = baseModel.lmHead { return lmHead(h) }
+                // Tied embeddings — re-use token embedding's transpose.
+                return baseModel.tokenEmbedding.asLinear(h)
+            }
+
+            // Load + dispatch on head type. Both kinds use the shared
+            // SpecHeadsStepResult shape so the metric reporting code below
+            // is uniform.
+            let kindLower = headType.lowercased()
+            var totalAccepted = 0
+            var totalProposed = 0
+            var stepCount = 0
+            var ids: [Int]
+            do {
+                let arr = promptIds[0, 0...]
+                eval(arr)
+                ids = arr.asArray(Int32.self).map { Int($0) }
+            }
+            let startCount = ids.count
+            let tHeadsStart = Date()
+
+            switch kindLower {
+            case "medusa":
+                let stack: MedusaHeadStack
+                do { stack = try MedusaHeadsIO.read(URL(fileURLWithPath: headsPath), baseConfig: cfg) }
+                catch { fputs("heads load failed: \(error)\n", stderr); exit(1) }
+                print("Medusa heads loaded: \(stack.cfg.numHeads) heads · \(formatLargeInt(stack.numParameters())) params")
+                while ids.count - startCount < maxTokens {
+                    if TrainSupport.stopRequested.isSet { break }
+                    let r = MedusaVerify.step(
+                        baseHidden: baseHidden, baseLogits: baseLogits,
+                        baseLMHead: baseLMHead, heads: stack,
+                        ids: &ids, ctxCap: cfg.contextLength
+                    )
+                    for id in r.acceptedIds { emit(id) }
+                    totalAccepted += r.proposalsAccepted
+                    totalProposed += r.proposalsTotal
+                    stepCount += 1
+                    if ids.count >= cfg.contextLength { break }
+                }
+            case "eagle":
+                let draftNet: EagleDraft
+                do { draftNet = try EagleDraftIO.read(URL(fileURLWithPath: headsPath), baseConfig: cfg) }
+                catch { fputs("heads load failed: \(error)\n", stderr); exit(1) }
+                print("EAGLE-2 draft loaded: \(draftNet.numHeads) unroll steps · \(formatLargeInt(draftNet.numParameters())) params")
+                while ids.count - startCount < maxTokens {
+                    if TrainSupport.stopRequested.isSet { break }
+                    let r = EagleVerify.step(
+                        baseHidden: baseHidden, baseLogits: baseLogits,
+                        baseLMHead: baseLMHead, draft: draftNet,
+                        ids: &ids, ctxCap: cfg.contextLength
+                    )
+                    for id in r.acceptedIds { emit(id) }
+                    totalAccepted += r.proposalsAccepted
+                    totalProposed += r.proposalsTotal
+                    stepCount += 1
+                    if ids.count >= cfg.contextLength { break }
+                }
+            default:
+                fputs("--head-type must be 'medusa' or 'eagle', got '\(headType)'\n", stderr)
+                exit(2)
+            }
+            let elapsedHeads = -tHeadsStart.timeIntervalSinceNow
+            let acceptRate = totalProposed > 0
+                ? Double(totalAccepted) / Double(totalProposed) : 0
+            let producedTokens = ids.count - startCount
+            let tps = elapsedHeads > 0 ? Double(producedTokens) / elapsedHeads : 0
+            fputs(String(format: "\n[heads] steps=%d, proposed=%d, accepted=%d (%.1f%%) · %.0f tok/s · %.2fs\n",
+                          stepCount, totalProposed, totalAccepted,
+                          acceptRate * 100, tps, elapsedHeads), stderr)
+        } else if let draft = draftModel {
             // Speculative decoding (greedy). Generate in bursts of up-to-K
             // tokens at a time. Temperature is ignored — the greedy
             // variant is lossless wrt target's argmax; sampled spec-decode
@@ -474,6 +585,12 @@ enum Sample {
                               Always keep the first N tokens (StreamingLLM anchor)
         --streaming-llm-window M
                               Keep only the last M tokens beyond the sink
+        --heads <path>        Speculative decoding with joint-trained heads
+                              (`.heads` sidecar from `tinygpt train-heads`).
+                              Greedy verify — temperature is ignored.
+        --head-type {medusa|eagle}
+                              Head architecture used by --heads (default medusa).
+                              Must match the sidecar's stored kind.
         """)
         exit(2)
     }
