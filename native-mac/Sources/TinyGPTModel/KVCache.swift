@@ -50,6 +50,30 @@ public final class KVCache {
     public let nLayers: Int
     public var currentLength: Int = 0
 
+    /// Pre-allocated maximum tokens for the in-place storage path. `nil`
+    /// (default) = grow-by-concat: each `append` allocates a new MLXArray
+    /// at the next length (the historic behaviour). When set to a positive
+    /// value, the FIRST append allocates a full `[B, H, capacity, D]`
+    /// buffer per layer and subsequent appends write into the existing
+    /// rows via slice assignment — no per-step allocation, no growing
+    /// concat, peak memory roughly constant across decode steps.
+    ///
+    /// Reads honour `validLengths[layer]` so SDPA only sees the populated
+    /// prefix of each layer's buffer, not the trailing zeros.
+    ///
+    /// `var` (not `let`) so a disk-loaded cache can be promoted into
+    /// in-place mode via `migrateToPreAlloc(capacity:)` — the persistent
+    /// cache path saves at the live length and we want the in-place fast
+    /// path to keep working through the remaining decode loop.
+    public var preAllocCapacity: Int?
+
+    /// Per-layer count of populated time slots in the pre-allocated
+    /// buffer. Equal to `currentLength` for layers that have been written
+    /// the same number of times — divergence is reserved for future
+    /// per-layer eviction (e.g., per-layer YOCO drops). Stays at 0 for
+    /// layers that never received a write. Unused in grow-by-concat mode.
+    public var validLengths: [Int] = []
+
     /// Storage dtype for cached K/V. `nil` (default) = match whatever the
     /// attention computes natively. Set to `.float16` to halve KV memory
     /// when running an fp32 model — attention output is dequantised on
@@ -103,7 +127,8 @@ public final class KVCache {
         nLayers: Int,
         kvDtype: DType? = nil,
         kivi: KIVIConfig? = nil,
-        sink: Int? = nil, window: Int? = nil
+        sink: Int? = nil, window: Int? = nil,
+        preAllocCapacity: Int? = nil
     ) {
         self.nLayers = nLayers
         self.entries = []
@@ -112,6 +137,16 @@ public final class KVCache {
         self.kivi = kivi
         self.sink = sink
         self.window = window
+        // In-place is mutually exclusive with KIVI / StreamingLLM (eviction
+        // would require fragmenting the contiguous buffer; we punt to a
+        // future patch). Silently fall back to grow-by-concat when those
+        // features are active.
+        if kivi != nil || sink != nil || window != nil {
+            self.preAllocCapacity = nil
+        } else {
+            self.preAllocCapacity = preAllocCapacity
+        }
+        self.validLengths = Array(repeating: 0, count: nLayers)
     }
 
     public func append(layer: Int, keys: MLXArray, values: MLXArray) {
@@ -136,14 +171,87 @@ public final class KVCache {
     private func appendDense(layer: Int, kNew: MLXArray, vNew: MLXArray) {
         let kIn = kvDtype.map { kNew.asType($0) } ?? kNew
         let vIn = kvDtype.map { vNew.asType($0) } ?? vNew
+        // Make sure per-layer slots exist (entries + validLengths).
         if entries.count <= layer {
             while entries.count <= layer {
-                entries.append(Entry(keys: kIn, values: vIn))
+                entries.append(Entry(
+                    keys: kIn[0..., 0..., 0..<0, 0...],
+                    values: vIn[0..., 0..., 0..<0, 0...]
+                ))
             }
+        }
+        while validLengths.count <= layer { validLengths.append(0) }
+
+        if let cap = preAllocCapacity {
+            appendInPlace(layer: layer, kIn: kIn, vIn: vIn, capacity: cap)
         } else {
-            entries[layer].keys = concatenated([entries[layer].keys, kIn], axis: 2)
+            appendByConcat(layer: layer, kIn: kIn, vIn: vIn)
+        }
+    }
+
+    /// Historic grow-by-concat path. Each call allocates a new MLXArray
+    /// sized `currentLength + T_new` along axis=2. Simple, correct, but
+    /// peak memory scales with cache length. Used when
+    /// `preAllocCapacity == nil` and when KIVI / StreamingLLM are on.
+    private func appendByConcat(layer: Int, kIn: MLXArray, vIn: MLXArray) {
+        let cur = entries[layer].keys
+        if cur.shape[2] == 0 {
+            entries[layer].keys = kIn
+            entries[layer].values = vIn
+        } else {
+            entries[layer].keys = concatenated([cur, kIn], axis: 2)
             entries[layer].values = concatenated([entries[layer].values, vIn], axis: 2)
         }
+        validLengths[layer] = entries[layer].keys.shape[2]
+    }
+
+    /// In-place path. On the first write to this layer we materialise the
+    /// full `[B, H, capacity, D]` buffer once (`MLXArray.zeros`), then for
+    /// every subsequent step we slice-assign `[:, :, valid:valid+T_new, :]`.
+    /// MLX-Swift's slice-set goes through a scatter op which still produces
+    /// a new MLXArray (MLX-C arrays are functional by design), but the
+    /// allocation cost is bounded by the SLICE size (T_new × D × bytes),
+    /// not by the cache length — so peak memory across a long decode
+    /// stays bounded at ~capacity once.
+    ///
+    /// Why we still get a measurable win even though MLX scatter copies:
+    /// the OUTPUT of the scatter is itself the full buffer, so we keep one
+    /// MLXArray alive across all steps. The concat path on the other hand
+    /// keeps creating ever-larger arrays whose lifetimes overlap with the
+    /// previous step's keys / values until MLX's reference counting frees
+    /// them — and Metal's allocator hasn't always released memory promptly
+    /// under pressure. Pre-allocation pins the working set at the start.
+    private func appendInPlace(layer: Int, kIn: MLXArray, vIn: MLXArray, capacity: Int) {
+        let valid = validLengths[layer]
+        let tNew = kIn.shape[2]
+        precondition(valid + tNew <= capacity,
+                     "KV cache overflow: valid \(valid) + new \(tNew) > capacity \(capacity)")
+        let keys: MLXArray
+        let values: MLXArray
+        if entries[layer].keys.shape[2] != capacity {
+            // First write to this layer — materialise the full buffer.
+            // Shape matches the new write's leading axes; we just stretch
+            // axis=2 to `capacity` and zero-fill the unused tail.
+            let B = kIn.shape[0]
+            let H = kIn.shape[1]
+            let D = kIn.shape[3]
+            keys = MLXArray.zeros([B, H, capacity, D]).asType(kIn.dtype)
+            let Hv = vIn.shape[1]
+            let Dv = vIn.shape[3]
+            values = MLXArray.zeros([B, Hv, capacity, Dv]).asType(vIn.dtype)
+        } else {
+            keys = entries[layer].keys
+            values = entries[layer].values
+        }
+        // Slice-assign the new K, V rows into the persistent buffer.
+        // The right-hand-side broadcasts along the time slice we name.
+        // MLXArray is a reference type so the subscript setter mutates
+        // the buffer in place — the binding stays `let`.
+        keys[0..., 0..., valid..<(valid + tNew), 0...] = kIn
+        values[0..., 0..., valid..<(valid + tNew), 0...] = vIn
+        entries[layer].keys = keys
+        entries[layer].values = values
+        validLengths[layer] = valid + tNew
     }
 
     /// KIVI quantisation path. `kNew` / `vNew` are the fresh K/V projected
@@ -356,10 +464,25 @@ public final class KVCache {
     public func keys(layer: Int) -> MLXArray? { entries.indices.contains(layer) ? entries[layer].keys : nil }
     public func values(layer: Int) -> MLXArray? { entries.indices.contains(layer) ? entries[layer].values : nil }
 
+    /// Logical "occupied" length for a layer's buffer. Equal to the dense
+    /// shape[2] when in-place isn't on, otherwise the in-place valid count.
+    /// SDPA reads slice the buffer down to this length so the model never
+    /// attends to the zero-padded tail.
+    private func liveLen(_ layer: Int) -> Int {
+        if preAllocCapacity != nil, layer < validLengths.count {
+            return validLengths[layer]
+        }
+        return entries[layer].keys.shape[2]
+    }
+
     /// Read-back with on-the-fly dtype upcast. Used by the attention
     /// extensions so SDPA always sees Q/K/V in the same dtype while the
     /// stored cache stays at `kvDtype` or KIVI-quantised (the memory-
     /// saving formats).
+    ///
+    /// When `preAllocCapacity` is set, the underlying buffer is sized at
+    /// the model's max context; we slice it down to the live length here
+    /// so SDPA's mask + matmul shapes line up with the actual token count.
     public func keys(layer: Int, asDType dt: DType) -> MLXArray? {
         guard entries.indices.contains(layer) else { return nil }
         let e = entries[layer]
@@ -367,7 +490,12 @@ public final class KVCache {
             return Self.dequantiseK(q: q, scale: sc, zero: zp, qMin: cfg.qMin, asDType: dt)
         }
         let k = e.keys
-        return k.dtype == dt ? k : k.asType(dt)
+        let cast = k.dtype == dt ? k : k.asType(dt)
+        if preAllocCapacity != nil {
+            let n = liveLen(layer)
+            if n < cast.shape[2] { return cast[0..., 0..., 0..<n, 0...] }
+        }
+        return cast
     }
     public func values(layer: Int, asDType dt: DType) -> MLXArray? {
         guard entries.indices.contains(layer) else { return nil }
@@ -376,7 +504,12 @@ public final class KVCache {
             return Self.dequantiseV(q: q, scale: sc, zero: zp, qMin: cfg.qMin, asDType: dt)
         }
         let v = e.values
-        return v.dtype == dt ? v : v.asType(dt)
+        let cast = v.dtype == dt ? v : v.asType(dt)
+        if preAllocCapacity != nil {
+            let n = liveLen(layer)
+            if n < cast.shape[2] { return cast[0..., 0..., 0..<n, 0...] }
+        }
+        return cast
     }
 
     /// Total cached-K/V bytes across all layers. Counts the active storage
@@ -384,9 +517,20 @@ public final class KVCache {
     /// (`keysQ` + `valuesQ` + scales + zeros) when KIVI is on. Reported in
     /// `tinygpt sample`'s footer for the memory-tradeoff smoke tests.
     public func totalBytes(byteWidth: (DType) -> Int) -> (bytes: Int, populated: Int) {
+        // Two byte counts to keep honest:
+        //   - PHYSICAL bytes: actual allocated buffer size. In the
+        //     in-place / pre-allocated mode this is the buffer at
+        //     `capacity` even when only some rows are populated.
+        //   - LOGICAL bytes: bytes worth of populated rows, i.e. what a
+        //     concat-mode cache would be sitting on at the same valid
+        //     length. For the GQA-aware audit + the autoregressive memory
+        //     report, the LOGICAL count is what matters — that's the
+        //     content the model actually attends to. Footer reports
+        //     logical bytes so the YOCO / GQA / KV-quantise savings
+        //     show up cleanly.
         var total = 0
         var populated = 0
-        for e in entries {
+        for (i, e) in entries.enumerated() {
             if let kQ = e.keysQ, let vQ = e.valuesQ {
                 total += kQ.shape.reduce(1, *) * byteWidth(kQ.dtype)
                 total += vQ.shape.reduce(1, *) * byteWidth(vQ.dtype)
@@ -396,12 +540,49 @@ public final class KVCache {
                 if let zp = e.vZeros { total += zp.shape.reduce(1, *) * byteWidth(zp.dtype) }
                 if kQ.shape[2] > 0 { populated += 1 }
             } else {
-                total += e.keys.shape.reduce(1, *) * byteWidth(e.keys.dtype)
-                total += e.values.shape.reduce(1, *) * byteWidth(e.values.dtype)
-                if e.keys.shape[2] > 0 { populated += 1 }
+                // Live prefix only — in-place mode allocates the full
+                // capacity buffer but only `validLengths[i]` slots are
+                // semantically populated. Report the logical size.
+                let live = i < validLengths.count && preAllocCapacity != nil
+                    ? validLengths[i] : e.keys.shape[2]
+                let kSliceShape = liveSliceShape(e.keys.shape, time: live)
+                let vSliceShape = liveSliceShape(e.values.shape, time: live)
+                total += kSliceShape.reduce(1, *) * byteWidth(e.keys.dtype)
+                total += vSliceShape.reduce(1, *) * byteWidth(e.values.dtype)
+                if live > 0 { populated += 1 }
             }
         }
         return (total, populated)
+    }
+
+    /// Substitute a different value on the time axis (index 2) of a
+    /// 4-D shape, leaving the other axes alone. Used in `totalBytes`
+    /// to compute "what we'd be storing if we trimmed to `time`".
+    private func liveSliceShape(_ shape: [Int], time: Int) -> [Int] {
+        guard shape.count == 4 else { return shape }
+        return [shape[0], shape[1], time, shape[3]]
+    }
+
+    /// Physical buffer size in bytes — counts the entire allocated buffer
+    /// (capacity-sized in pre-alloc mode, just the populated rows in
+    /// concat mode). Useful for verifying the in-place buffer DOESN'T grow
+    /// across decode steps.
+    public func physicalBytes(byteWidth: (DType) -> Int) -> Int {
+        var total = 0
+        for e in entries {
+            if let kQ = e.keysQ, let vQ = e.valuesQ {
+                total += kQ.shape.reduce(1, *) * byteWidth(kQ.dtype)
+                total += vQ.shape.reduce(1, *) * byteWidth(vQ.dtype)
+                if let sc = e.kScales { total += sc.shape.reduce(1, *) * byteWidth(sc.dtype) }
+                if let zp = e.kZeros { total += zp.shape.reduce(1, *) * byteWidth(zp.dtype) }
+                if let sc = e.vScales { total += sc.shape.reduce(1, *) * byteWidth(sc.dtype) }
+                if let zp = e.vZeros { total += zp.shape.reduce(1, *) * byteWidth(zp.dtype) }
+            } else {
+                total += e.keys.shape.reduce(1, *) * byteWidth(e.keys.dtype)
+                total += e.values.shape.reduce(1, *) * byteWidth(e.values.dtype)
+            }
+        }
+        return total
     }
 
     /// Persist this cache's K/V state to disk for prefix caching.
@@ -416,10 +597,16 @@ public final class KVCache {
         withUnsafeBytes(of: &nLayersOut) { buf.append(contentsOf: $0) }
         for (i, e) in entries.enumerated() {
             // Dequantise on save for portability — readers don't need to
-            // know about KIVI.
+            // know about KIVI. In pre-alloc mode we save the live prefix
+            // only (slicing through `keys(layer:asDType:)` does that for
+            // us); the capacity-sized zero tail would round-trip but waste
+            // disk bytes 10×+ for short prompts in a long-context model.
             let kSave: MLXArray
             let vSave: MLXArray
             if kivi != nil, e.keysQ != nil {
+                kSave = keys(layer: i, asDType: .float32)!
+                vSave = values(layer: i, asDType: .float32)!
+            } else if preAllocCapacity != nil {
                 kSave = keys(layer: i, asDType: .float32)!
                 vSave = values(layer: i, asDType: .float32)!
             } else {
@@ -454,13 +641,100 @@ public final class KVCache {
                           userInfo: [NSLocalizedDescriptionKey: "prefix cache layer count \(nL) ≠ model \(expectedLayers)"])
         }
         let c = KVCache(nLayers: expectedLayers)
-        for _ in 0..<nL {
+        // `validLengths` was pre-sized to nLayers zeros in init; overwrite
+        // each slot rather than appending so the array stays length-N.
+        // Loaded tensors come back at their LIVE (saved-prefix) size, so
+        // `validLengths[i] == keys.shape[2]`. The caller can promote to
+        // in-place via `migrateToPreAlloc(capacity:)`.
+        for layer in 0..<nL {
             let k = try readTensor(data, off: &off)
             let v = try readTensor(data, off: &off)
             c.entries.append(Entry(keys: k, values: v))
+            if layer < c.validLengths.count {
+                c.validLengths[layer] = k.shape[2]
+            } else {
+                c.validLengths.append(k.shape[2])
+            }
         }
         c.currentLength = Int(try readU32())
         return c
+    }
+
+    /// Promote a load-from-disk dense cache to the pre-allocated in-place
+    /// layout. Called by the sample driver after `KVCache.load(...)` when
+    /// the user is in pre-alloc mode — we'd otherwise stay on the concat
+    /// path for the rest of the session even though the persistent-cache
+    /// hit was supposed to be a fast path. Allocates one `capacity`-sized
+    /// buffer per layer and copies the loaded prefix into rows
+    /// `[0, validLengths[i])`.
+    /// Drop the trailing `n` time slots from every layer's cache. Used by
+    /// the persistent-cache re-prefill: after loading a saved cache for
+    /// the prompt, we rewind by one token so the last prompt token can be
+    /// re-fed through `forwardCached` to produce the first generation
+    /// logit (the saved cache holds K, V but not the unembed-logits).
+    ///
+    /// In pre-alloc mode we just shrink `validLengths`; the underlying
+    /// buffers stay capacity-sized so the next `appendInPlace` will write
+    /// into the (now freed) slot without re-allocating. In concat mode we
+    /// slice the buffers down to the shorter prefix.
+    public func rewind(by n: Int) {
+        guard n > 0 else { return }
+        for layer in entries.indices {
+            if preAllocCapacity != nil, layer < validLengths.count {
+                validLengths[layer] = max(0, validLengths[layer] - n)
+            } else {
+                let k = entries[layer].keys
+                let v = entries[layer].values
+                let cur = k.shape[2]
+                let next = max(0, cur - n)
+                if next < cur {
+                    entries[layer].keys = k[0..., 0..., 0..<next, 0...]
+                    entries[layer].values = v[0..., 0..., 0..<next, 0...]
+                }
+            }
+        }
+        currentLength = max(0, currentLength - n)
+    }
+
+    public func migrateToPreAlloc(capacity: Int) {
+        // The init-time mutability check (KIVI / StreamingLLM ⇒ no pre-
+        // alloc) already gated this. If a caller wires it on a KIVI cache
+        // we no-op so the on-disk format stays the contract.
+        if kivi != nil || sink != nil || window != nil { return }
+        self.preAllocCapacity = capacity
+        mountForInPlace(capacity: capacity)
+    }
+
+    /// Internal: rebuild each layer's buffer at `capacity` with the
+    /// loaded prefix copied in. We never expose this in the public init
+    /// because the init-time exclusion against KIVI / StreamingLLM is
+    /// the place where the safety check lives. After this runs,
+    /// `entries[i].keys.shape[2] == capacity` and reads return the slice
+    /// `[0..validLengths[i])` via the existing `keys(layer:asDType:)`
+    /// path — exactly the same shape SDPA sees from a same-length concat
+    /// cache.
+    private func mountForInPlace(capacity: Int) {
+        for i in entries.indices {
+            let live = validLengths.indices.contains(i) ? validLengths[i] : entries[i].keys.shape[2]
+            guard entries[i].keys.shape[2] != capacity else { continue }
+            let k = entries[i].keys
+            let v = entries[i].values
+            let kDtype = k.dtype
+            let vDtype = v.dtype
+            let B = k.shape[0]
+            let H = k.shape[1]
+            let D = k.shape[3]
+            let Hv = v.shape[1]
+            let Dv = v.shape[3]
+            let newK = MLXArray.zeros([B, H, capacity, D]).asType(kDtype)
+            let newV = MLXArray.zeros([B, Hv, capacity, Dv]).asType(vDtype)
+            if live > 0 {
+                newK[0..., 0..., 0..<live, 0...] = k
+                newV[0..., 0..., 0..<live, 0...] = v
+            }
+            entries[i].keys = newK
+            entries[i].values = newV
+        }
     }
 
     /// Append a tensor as (rank u32, shape... u32, fp32 bytes) into `buf`.
@@ -505,10 +779,21 @@ extension CausalSelfAttention {
     public func forwardCached(_ x: MLXArray, cache: KVCache, layer: Int) -> MLXArray {
         let B = x.shape[0]
         let T = x.shape[1]
-        // Project Q/K/V from x; reshape to [B, T, H, D] → transpose to [B, H, T, D]
+        // Project Q/K/V from x; reshape to [B, T, H, D] → transpose to [B, H, T, D].
+        // GQA correctness: K/V projections produce nKvHeads * headDim (set
+        // up in TransformerBlock.swift line 68 as `kvDim = nKvHeads * headDim`),
+        // so they MUST reshape to `nKvHeads` heads. Using nHeads here would
+        // either crash on a shape mismatch (GQA models) or silently break
+        // attention (if nKvHeads*headDim happened to be reshape-compatible
+        // with [nHeads, headDim/nHeads*nKvHeads], which doesn't generally
+        // hold). The HF variant in KVCacheHF.swift gets this right; the
+        // from-scratch path silently followed the standard-MHA shape for
+        // months because no from-scratch preset enables GQA today. The
+        // fix is forward-compatible — non-GQA presets have nKvHeads == nHeads
+        // and the behaviour is unchanged.
         let q = qProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
-        let kNew = kProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
-        let vNew = vProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
+        let kNew = kProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
+        let vNew = vProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
 
         // Push into the cache — that path handles downcast-on-store (KV
         // quantisation) and sink-window pruning (StreamingLLM). Then read

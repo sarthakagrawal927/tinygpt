@@ -25,6 +25,15 @@ enum Sample {
         var prefixCachePath: String? = nil // path to load/save prompt KV cache
         var streamingSink: Int? = nil
         var streamingWindow: Int? = nil
+        // Persistent cache: hash-keyed prompt cache. When --prompt-cache-dir is
+        // set we auto-save / auto-load by hash(modelName + prompt + cfg). The
+        // explicit --cache-prompt path still takes precedence (back-compat).
+        var promptCacheDir: String? = nil
+        // Pre-allocate the cache buffer at max context so per-step decodes
+        // skip the per-step concat allocation. Off by default (matches the
+        // historic concat behaviour); enable with --kv-preallocate or when
+        // --prompt-cache-dir is set (a fresh-load cache always benefits).
+        var preAllocate: Bool = false
         // Speculative-decode HEADS (Medusa / EAGLE-2). When --heads is set,
         // we route generation through the joint-head verification path
         // instead of the standard per-token decode loop. See
@@ -86,6 +95,13 @@ enum Sample {
             case "--cache-prompt":
                 guard i + 1 < args.count else { exitUsage() }
                 prefixCachePath = args[i + 1]; i += 2
+            case "--prompt-cache-dir":
+                guard i + 1 < args.count else { exitUsage() }
+                promptCacheDir = args[i + 1]; i += 2
+            case "--kv-preallocate":
+                preAllocate = true; i += 1
+            case "--no-kv-preallocate":
+                preAllocate = false; i += 1
             case "--streaming-llm-sink":
                 guard i + 1 < args.count else { exitUsage() }
                 streamingSink = Int(args[i + 1]); i += 2
@@ -298,27 +314,93 @@ enum Sample {
             fputs("--kv-quantize: cannot mix dtype downcast and KIVI int-quantisation\n", stderr)
             exit(2)
         }
-        // Build OR load the cache:
-        //   --cache-prompt <path>: if the file exists, load it (skip prefill);
-        //   otherwise build an empty cache, prefill, and write it on exit.
+        // Build OR load the cache. Three modes, in priority order:
+        //
+        //   1. --cache-prompt <path> — explicit user-managed path. Wins over
+        //      everything else. Same prompt requires same path each time.
+        //
+        //   2. --prompt-cache-dir <dir> — hash-keyed auto-cache. Filename
+        //      derives from SHA(modelName + prompt + cfg), so changing any
+        //      of those forces a fresh prefill on next launch. The expected
+        //      use is a long-lived agent system prompt: first launch writes,
+        //      every subsequent launch loads.
+        //
+        //   3. No flags — build a fresh cache, never persist.
+        //
+        // Pre-allocation is independent: when `preAllocate` is true (or
+        // when we're in promptCacheDir mode, because the persistent path
+        // is going to keep generating after a load) we allocate a full
+        // [B, H, ctx, D] buffer per layer up-front and write into it via
+        // slice assignment instead of growing with concat. KIVI and
+        // StreamingLLM disable pre-allocation in KVCache.init — eviction
+        // requires fragmenting the buffer, which is a future patch.
         var cache: KVCache? = nil
         var skipPrefill = false
+        // Resolve the effective load/save path. Explicit --cache-prompt
+        // wins; otherwise derive from the dir + hash(model + prompt + cfg).
+        // Build the hash key once so both load and save sides agree.
+        let kvTag: KVCachePersist.KVTag = {
+            if let cfg = kvKIVI { return cfg.bits == 4 ? .kiviInt4 : .kiviInt8 }
+            switch kvDType {
+            case .some(.float16): return .fp16
+            case .some(.bfloat16): return .bf16
+            default: return .fp32
+            }
+        }()
+        let cacheKey = KVCachePersist.Key(
+            modelName: cfg.modelName,
+            // (size, mtime) of the model file scopes the cache to the
+            // specific checkpoint, not just the architecture preset. Two
+            // chat and code models both built from the same preset have
+            // the same modelName but different fingerprints → different
+            // cache files → no cross-pollution.
+            modelFileFingerprint: KVCachePersist.fingerprint(of: path),
+            prompt: prompt,
+            vocabSize: cfg.vocabSize, nLayers: cfg.nLayers,
+            kvTag: kvTag, useYOCO: cfg.useYOCO
+        )
+        var resolvedCachePath: URL? = prefixCachePath.map { URL(fileURLWithPath: $0) }
+        var resolvedMetaPath: URL? = nil
+        if resolvedCachePath == nil, let dir = promptCacheDir {
+            let dirURL = URL(fileURLWithPath: dir)
+            do {
+                try KVCachePersist.ensureDir(dirURL)
+                let (cacheURL, metaURL) = KVCachePersist.paths(for: cacheKey, in: dirURL)
+                resolvedCachePath = cacheURL
+                resolvedMetaPath = metaURL
+            } catch {
+                fputs("warning: could not create prompt cache dir \(dir): \(error). Skipping persistence.\n", stderr)
+            }
+        }
         if useActualCache {
-            if let p = prefixCachePath,
-               FileManager.default.fileExists(atPath: p)
+            if let url = resolvedCachePath,
+               FileManager.default.fileExists(atPath: url.path)
             {
                 do {
-                    cache = try KVCache.load(from: URL(fileURLWithPath: p), nLayers: cfg.nLayers)
+                    cache = try KVCache.load(from: url, nLayers: cfg.nLayers)
                     skipPrefill = true
-                    print("loaded prefix cache (\(cache!.currentLength) tokens) — skipping prompt prefill")
+                    let source = (prefixCachePath != nil) ? "prefix cache" : "auto cache"
+                    print("loaded \(source) (\(cache!.currentLength) tokens) — skipping prompt prefill")
                 } catch {
                     fputs("warning: prefix cache load failed (\(error)); building fresh\n", stderr)
                 }
             }
             if cache == nil {
+                // `preAllocCapacity = cfg.contextLength` activates the
+                // in-place storage path: one buffer per layer of size
+                // [B, H, ctx, D], all subsequent appends write via slice
+                // assignment. Skipped automatically by KVCache.init when
+                // KIVI or StreamingLLM is on.
+                let cap = preAllocate ? cfg.contextLength : nil
                 cache = KVCache(nLayers: cfg.nLayers, kvDtype: kvDType,
                                  kivi: kvKIVI,
-                                 sink: streamingSink, window: streamingWindow)
+                                 sink: streamingSink, window: streamingWindow,
+                                 preAllocCapacity: cap)
+            } else if preAllocate, let c = cache {
+                // Disk-loaded cache + pre-alloc requested: promote each
+                // layer's buffer to capacity-sized so the post-load decode
+                // doesn't drop back to concat mode.
+                c.migrateToPreAlloc(capacity: cfg.contextLength)
             }
             if kvDType != nil {
                 print("KV cache stored at \(kvQuantize!) (≈½ memory vs fp32)")
@@ -334,6 +416,17 @@ enum Sample {
             }
             if streamingSink != nil || streamingWindow != nil {
                 print("StreamingLLM: sink=\(streamingSink ?? 0) window=\(streamingWindow ?? 0) (drop middle on overflow)")
+            }
+            if let c = cache, c.preAllocCapacity != nil {
+                // stderr so it doesn't interleave with the streaming text.
+                fputs("KV cache: pre-allocated buffer (\(cfg.contextLength) tokens capacity, in-place writes)\n", stderr)
+            }
+            if let url = resolvedCachePath, !skipPrefill, prefixCachePath == nil {
+                // Auto-cache MISS on a --prompt-cache-dir run. Print so the
+                // user can see the first call is paying the prefill cost
+                // and the second will skip it. Pre-key reveal helps debug
+                // collisions if they ever happen.
+                fputs("auto cache miss → will write \(url.lastPathComponent) after prefill\n", stderr)
             }
         }
 
@@ -495,16 +588,10 @@ enum Sample {
                 // counting that position, then re-add it via forwardCached.
                 let lastTok = promptIds[0..., promptIds.shape[1] - 1 ..< promptIds.shape[1]]
                 // Rewind cache by one token so we re-feed the prompt's tail.
-                let cl = cache.currentLength
-                if cl >= 1 {
-                    for layer in cache.entries.indices {
-                        let k = cache.entries[layer].keys
-                        let v = cache.entries[layer].values
-                        cache.entries[layer].keys = k[0..., 0..., 0..<(k.shape[2] - 1), 0...]
-                        cache.entries[layer].values = v[0..., 0..., 0..<(v.shape[2] - 1), 0...]
-                    }
-                    cache.currentLength = cl - 1
-                }
+                // `KVCache.rewind` handles both concat and in-place layouts
+                // (in-place just shrinks `validLengths`; the buffer rows
+                // are still there but no longer attended to).
+                cache.rewind(by: 1)
                 let logits = model.forwardCached(lastTok, cache: cache)
                 lastLogits = logits[0..., logits.shape[1] - 1, 0...]
             } else {
@@ -512,11 +599,18 @@ enum Sample {
                 lastLogits = prefillLogits[0..., prefillLogits.shape[1] - 1, 0...]
                 // Save the populated cache if the user requested it AND we
                 // built fresh — first cold call pays the prefill cost; later
-                // ones for the same prompt skip it.
-                if let p = prefixCachePath {
+                // ones for the same prompt skip it. Same path covers both
+                // --cache-prompt and the hash-derived auto-cache.
+                if let url = resolvedCachePath {
                     do {
-                        try cache.saveToDisk(to: URL(fileURLWithPath: p))
-                        fputs("saved prefix cache → \(p)\n", stderr)
+                        try cache.saveToDisk(to: url)
+                        let (totalBytes, _) = cache.totalBytes(byteWidth: dtypeByteWidth)
+                        fputs("saved prefix cache → \(url.path)\n", stderr)
+                        if let meta = resolvedMetaPath {
+                            KVCachePersist.writeMeta(
+                                cacheKey, to: meta,
+                                tokens: cache.currentLength, bytes: totalBytes)
+                        }
                     } catch {
                         fputs("warning: prefix cache save failed: \(error)\n", stderr)
                     }
@@ -583,8 +677,16 @@ enum Sample {
             let streamTag = (streamingSink != nil || streamingWindow != nil)
                 && storedTokens != c.currentLength
                 ? "  · stored \(storedTokens) (StreamingLLM cap)" : ""
-            print(String(format: "KV cache:  %d tokens · %@%@%@",
-                          c.currentLength, formatBytes(totalBytes), yocoTag, streamTag))
+            // Pre-allocated buffer: report the PHYSICAL bytes too so the
+            // user can see the upper bound. Logical is what the model
+            // attends to; physical is what's pinned in memory.
+            var preAllocTag = ""
+            if c.preAllocCapacity != nil {
+                let phys = c.physicalBytes(byteWidth: dtypeByteWidth)
+                preAllocTag = "  · physical \(formatBytes(phys)) (pre-alloc)"
+            }
+            print(String(format: "KV cache:  %d tokens · %@%@%@%@",
+                          c.currentLength, formatBytes(totalBytes), yocoTag, streamTag, preAllocTag))
         }
     }
 
@@ -636,6 +738,16 @@ enum Sample {
                               MLX's lack of nibble-packing).
         --cache-prompt <path> Save prompt KV cache to <path> on first run;
                               load it on subsequent runs (skip prompt prefill)
+        --prompt-cache-dir <dir>
+                              Auto-cache the prompt KV by SHA(modelName + prompt
+                              + config). First launch writes to <dir>; second
+                              launch with the same prompt loads and skips
+                              prefill (10×-100× TTFT speedup on long prompts).
+        --kv-preallocate      Pre-allocate the KV buffer at max context. Decode
+                              writes via slice assignment instead of growing
+                              the cache with concat — peak memory stays flat
+                              across long generations. (Disabled by KIVI /
+                              StreamingLLM since those need eviction.)
         --streaming-llm-sink N
                               Always keep the first N tokens (StreamingLLM anchor)
         --streaming-llm-window M
