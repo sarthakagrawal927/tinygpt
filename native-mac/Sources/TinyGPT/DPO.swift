@@ -56,6 +56,7 @@ enum DPO {
         var simpoGamma: Float = 1.0
         // ORPO's preference-term weight λ (paper recommends 0.1).
         var orpoLambda: Float = 0.1
+        var optimizerKind: OptimizerKind = .adamw
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -80,6 +81,11 @@ enum DPO {
                 lossType = lt; i += 2
             case "--gamma":         simpoGamma = Float(args[i+1]) ?? simpoGamma; i += 2
             case "--orpo-lambda":   orpoLambda = Float(args[i+1]) ?? orpoLambda; i += 2
+            case "--optimizer":
+                guard let k = parseOptimizerKind(args[i+1]) else {
+                    fputs("unknown --optimizer '\(args[i+1])'. Pick adamw|lion|sophia|muon|adafactor.\n", stderr); exit(2)
+                }
+                optimizerKind = k; i += 2
             case "-h", "--help":    exitUsage()
             default:
                 if args[i].hasPrefix("-") { fputs("unknown flag: \(args[i])\n", stderr); exitUsage() }
@@ -191,7 +197,8 @@ enum DPO {
             lossType: lossType, lr: lr, beta: beta,
             simpoGamma: simpoGamma, orpoLambda: orpoLambda,
             gradClipNorm: gradClipNorm > 0 ? gradClipNorm : nil,
-            loraPlusRatio: loraPlusRatio > 1 ? loraPlusRatio : nil)
+            loraPlusRatio: loraPlusRatio > 1 ? loraPlusRatio : nil,
+            optimizerKind: optimizerKind)
 
         TrainSupport.installSigintHandler()
         TrainSupport.stopRequested.reset()
@@ -291,7 +298,8 @@ enum DPO {
         policy: AnyModel, ref: AnyModel?,
         lossType: LossType, lr: Float, beta: Float,
         simpoGamma: Float, orpoLambda: Float,
-        gradClipNorm: Float?, loraPlusRatio: Float?
+        gradClipNorm: Float?, loraPlusRatio: Float?,
+        optimizerKind: OptimizerKind
     ) -> ((MLXArray, MLXArray, MLXArray), (MLXArray, MLXArray, MLXArray)) -> Float {
         let clip = gradClipNorm
         let lpRatio = loraPlusRatio
@@ -359,7 +367,7 @@ enum DPO {
                 return computeLoss(polC: polC, polR: polR, refC: refC, refR: refR)
             }
             let gradFn = valueAndGrad(model: polM, lossFn)
-            let opt = AdamW(learningRate: lr, weightDecay: 0)
+            let opt = makeOptimizer(kind: optimizerKind, learningRate: lr, weightDecay: 0)
             return { chosen, rejected in
                 box.chosenM = chosen.2
                 box.rejectedX = rejected.0; box.rejectedY = rejected.1; box.rejectedM = rejected.2
@@ -380,7 +388,7 @@ enum DPO {
                 return computeLoss(polC: polC, polR: polR, refC: refC, refR: refR)
             }
             let gradFn = valueAndGrad(model: polM, lossFn)
-            let opt = AdamW(learningRate: lr, weightDecay: 0)
+            let opt = makeOptimizer(kind: optimizerKind, learningRate: lr, weightDecay: 0)
             return { chosen, rejected in
                 box.chosenM = chosen.2
                 box.rejectedX = rejected.0; box.rejectedY = rejected.1; box.rejectedM = rejected.2
@@ -456,6 +464,8 @@ enum DPO {
                                    SimPO and ORPO are reference-free (½ memory).
         --gamma F                SimPO reward-margin γ (default 1.0).
         --orpo-lambda F          ORPO preference-term weight λ (default 0.1).
+        --optimizer K            adamw (default) | lion | sophia | muon | adafactor.
+                                   See docs/optimizers.md.
 
         Memory: DPO/KTO hold the base TWICE (policy + ref). SimPO/ORPO need
         only one copy. Use --dtype bfloat16

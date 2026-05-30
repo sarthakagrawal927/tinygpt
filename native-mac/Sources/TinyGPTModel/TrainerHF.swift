@@ -9,7 +9,9 @@ import MLXOptimizers
 /// don't compose nicely with the MLX value-and-grad signature today.
 public final class TrainerHF {
     public let model: TinyGPTModelHF
-    public let optimizer: AdamW
+    /// Generic optimiser handle — see `Trainer.optimizer`.
+    public let optimizer: any Optimizer & LearningRateMutable
+    public let optimizerKind: OptimizerKind
     public private(set) var stepCount: Int = 0
     public let gradClipNorm: Float?
     private let trainStepFn: (MLXArray, MLXArray) -> MLXArray
@@ -20,11 +22,18 @@ public final class TrainerHF {
                 betas: (Float, Float) = (0.9, 0.95),
                 eps: Float = 1e-8,
                 compileStep: Bool = true,
-                gradClipNorm: Float? = nil) {
+                gradClipNorm: Float? = nil,
+                optimizer optimizerKind: OptimizerKind = .adamw) {
         self.model = model
         self.gradClipNorm = gradClipNorm
-        self.optimizer = AdamW(learningRate: learningRate, betas: betas,
-                                eps: eps, weightDecay: weightDecay)
+        self.optimizerKind = optimizerKind
+        self.optimizer = makeOptimizer(
+            kind: optimizerKind,
+            learningRate: learningRate,
+            weightDecay: weightDecay,
+            betas: betas,
+            eps: eps
+        )
         let m = model
         let opt = self.optimizer
         let clip = gradClipNorm

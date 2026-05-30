@@ -36,6 +36,7 @@ enum SFT {
         var loraPlusRatio: Float = 1.0
         var useDora: Bool = false
         var packSequences = false
+        var optimizerKind: OptimizerKind = .adamw
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -53,6 +54,11 @@ enum SFT {
             case "--lora-plus-ratio": loraPlusRatio = Float(args[i+1]) ?? loraPlusRatio; i += 2
             case "--pack":          packSequences = true; i += 1
             case "--dora":          useDora = true; i += 1
+            case "--optimizer":
+                guard let k = parseOptimizerKind(args[i+1]) else {
+                    fputs("unknown --optimizer '\(args[i+1])'. Pick adamw|lion|sophia|muon|adafactor.\n", stderr); exit(2)
+                }
+                optimizerKind = k; i += 2
             case "-h", "--help":    exitUsage()
             default:
                 if args[i].hasPrefix("-") { fputs("unknown flag: \(args[i])\n", stderr); exitUsage() }
@@ -158,7 +164,8 @@ enum SFT {
         // Build a masked-loss train step for whichever model variant.
         let stepFn = makeMaskedStepFn(load.model, lr: lr,
                                        gradClipNorm: gradClipNorm > 0 ? gradClipNorm : nil,
-                                       loraPlusRatio: loraPlusRatio > 1 ? loraPlusRatio : nil)
+                                       loraPlusRatio: loraPlusRatio > 1 ? loraPlusRatio : nil,
+                                       optimizerKind: optimizerKind)
 
         TrainSupport.installSigintHandler()
         TrainSupport.stopRequested.reset()
@@ -217,7 +224,8 @@ enum SFT {
     /// Scaling happens AFTER clipping to mirror per-param-LR semantics.
     private static func makeMaskedStepFn(_ model: AnyModel, lr: Float,
                                           gradClipNorm: Float?,
-                                          loraPlusRatio: Float?)
+                                          loraPlusRatio: Float?,
+                                          optimizerKind: OptimizerKind)
         -> (MLXArray, MLXArray, MLXArray) -> Float
     {
         // Wrap the mask in a class so the closure captures by reference
@@ -230,7 +238,7 @@ enum SFT {
 
         switch model {
         case .fromScratch(let m):
-            let opt = AdamW(learningRate: lr, weightDecay: 0)
+            let opt = makeOptimizer(kind: optimizerKind, learningRate: lr, weightDecay: 0)
             let lossFn = { (mm: TinyGPTModel, x: MLXArray, y: MLXArray) -> MLXArray in
                 AnyModel.fromScratch(mm).maskedLoss(x, y, maskBox.value)
             }
@@ -245,7 +253,7 @@ enum SFT {
                 return loss.item(Float.self)
             }
         case .huggingFace(let m):
-            let opt = AdamW(learningRate: lr, weightDecay: 0)
+            let opt = makeOptimizer(kind: optimizerKind, learningRate: lr, weightDecay: 0)
             let lossFn = { (mm: TinyGPTModelHF, x: MLXArray, y: MLXArray) -> MLXArray in
                 AnyModel.huggingFace(mm).maskedLoss(x, y, maskBox.value)
             }
@@ -299,6 +307,8 @@ enum SFT {
                                    Adds a learnable per-output magnitude vector to
                                    each wrapped Linear; better quality at same rank.
                                    In-session only — DoRA adapters aren't yet on disk.
+        --optimizer K            adamw (default) | lion | sophia | muon | adafactor.
+                                   See docs/optimizers.md.
         """)
         exit(2)
     }

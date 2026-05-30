@@ -141,7 +141,15 @@ public func clipGradNorm(_ grads: ModuleParameters, maxNorm: Float) -> ModulePar
 /// repeated 4× gives the same effective batch with ¼ the memory cost.
 public final class Trainer {
     public let model: TinyGPTModel
-    public let optimizer: AdamW
+    /// Generic optimiser handle — any of AdamW, Lion, Sophia, Muon, or
+    /// Adafactor (the latter wrapped in `AdafactorAdapter`). Exposed
+    /// through the `Optimizer & LearningRateMutable` composition so
+    /// the schedule code can both step it and adjust its learning rate.
+    public let optimizer: any Optimizer & LearningRateMutable
+    /// Which optimiser kind backs `optimizer`, for diagnostics + the
+    /// per-step LR-scheduler bookkeeping. Defaults to .adamw when the
+    /// older AdamW-only initializer path is used.
+    public let optimizerKind: OptimizerKind
     public private(set) var stepCount: Int = 0
     /// L2 norm cap for gradient clipping. `nil` = off; `1.0` is the
     /// transformer-LM default.
@@ -161,16 +169,19 @@ public final class Trainer {
         betas: (Float, Float) = (0.9, 0.95),
         eps: Float = 1e-8,
         compileStep: Bool = true,
-        gradClipNorm: Float? = nil
+        gradClipNorm: Float? = nil,
+        optimizer optimizerKind: OptimizerKind = .adamw
     ) {
         self.model = model
         self.useCompile = compileStep
         self.gradClipNorm = gradClipNorm
-        self.optimizer = AdamW(
+        self.optimizerKind = optimizerKind
+        self.optimizer = makeOptimizer(
+            kind: optimizerKind,
             learningRate: learningRate,
+            weightDecay: weightDecay,
             betas: betas,
-            eps: eps,
-            weightDecay: weightDecay
+            eps: eps
         )
         // value_and_grad of the loss function, captured to apply via optimizer.
         // The closure captures `model` by reference — MLX's autograd

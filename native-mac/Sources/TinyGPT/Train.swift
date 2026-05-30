@@ -81,6 +81,9 @@ enum Train {
         // TransformerBlock's forward is wrapped in a CustomFunction
         // whose VJP recomputes the block forward at backward time.
         var useGradCheckpoint: Bool = false
+        // Optimiser choice (Lion, Sophia, Muon, Adafactor; default
+        // AdamW preserves backward compat). See `Optimizers.swift`.
+        var optimizerKind: OptimizerKind = .adamw
 
         var i = 0
         while i < args.count {
@@ -114,6 +117,11 @@ enum Train {
             case "--diff-attn":      useDiffAttn = true; i += 1
             case "--yoco":           useYOCO = true; i += 1
             case "--grad-checkpoint": useGradCheckpoint = true; i += 1
+            case "--optimizer":
+                guard let k = parseOptimizerKind(args[i+1]) else {
+                    fputs("unknown --optimizer '\(args[i+1])'. Pick adamw|lion|sophia|muon|adafactor.\n", stderr); exit(2)
+                }
+                optimizerKind = k; i += 2
             case "-h", "--help":  exitUsage()
             default:
                 fputs("unknown flag: \(args[i])\n", stderr); exitUsage()
@@ -347,7 +355,8 @@ enum Train {
         let effectiveClip: Float? = gradClipNorm > 0 ? gradClipNorm : nil
         let trainer = Trainer(model: model, learningRate: initialLR,
                               compileStep: canCompile,
-                              gradClipNorm: effectiveClip)
+                              gradClipNorm: effectiveClip,
+                              optimizer: optimizerKind)
 
         let effB = B * accumSteps
         print("""
@@ -363,6 +372,7 @@ enum Train {
         corpus:        \(corpusSummary)
         train/val:     \(trainSummary) / \(valSummary)
         lr schedule:   \(lrSchedule)\(useSchedule ? " (warmup \(warmupSteps), max \(maxLR), min \(minLR))" : " @ \(maxLR)")
+        optimizer:     \(optimizerKind.rawValue)
         grad clip:     \(effectiveClip.map { "global L2 ≤ \($0)" } ?? "off")
         grad ckpt:     \(cfg.useGradCheckpoint ? "on (per-block VJP recompute · ~30% slower, ~√L activation mem)" : "off")
         save-every:    \(saveEvery.map { "\($0) steps · atomic" } ?? "end only")
@@ -693,6 +703,9 @@ enum Train {
           --alibi                         Use ALiBi position bias (Press et al., 2021)
                                            in lieu of positional embeddings/RoPE. Better
                                            extrapolation beyond train context length.
+          --optimizer K                   AdamW (default) | lion | sophia | muon | adafactor.
+                                           See docs/optimizers.md for memory + tradeoffs.
+                                           Drop-in: same --max-lr / --weight-decay etc.
           --grad-checkpoint               Activation (gradient) checkpointing. Wraps each
                                            TransformerBlock's forward in a CustomFunction
                                            whose VJP recomputes the block forward at
