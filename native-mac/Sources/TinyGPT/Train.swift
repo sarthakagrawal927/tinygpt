@@ -107,6 +107,13 @@ enum Train {
         // level BPE). The dropout encoder reads `tokenizer.json`
         // directly — see BPEDropout.swift for the rationale.
         var bpeDropout: Float = 0
+        // Quantization-Aware Training. `--qat int4` or `--qat int8`
+        // injects per-Linear fake-quant on every forward — round to a
+        // per-output-row symmetric int grid, dequantise, propagate the
+        // gradient via straight-through. Lifts deployment quality at
+        // the matching int width by training the optimiser to route
+        // around the quantisation noise.
+        var qatBits: Int? = nil
 
         var i = 0
         while i < args.count {
@@ -152,6 +159,16 @@ enum Train {
             case "--lr-layer-decay":     lrLayerDecay = Float(args[i+1]) ?? 1.0; i += 2
             case "--embedding-rmsnorm":  useEmbeddingRMSNorm = true; i += 1
             case "--bpe-dropout":    bpeDropout = Float(args[i+1]) ?? bpeDropout; i += 2
+            case "--qat":
+                let v = args[i+1].lowercased()
+                switch v {
+                case "int4", "4":  qatBits = 4
+                case "int8", "8":  qatBits = 8
+                case "off", "none", "0": qatBits = nil
+                default:
+                    fputs("--qat must be int4 or int8 (got \(v))\n", stderr); exit(2)
+                }
+                i += 2
             case "-h", "--help":  exitUsage()
             default:
                 fputs("unknown flag: \(args[i])\n", stderr); exitUsage()
@@ -212,6 +229,11 @@ enum Train {
                 useEmbeddingRMSNorm: h.useEmbeddingRMSNorm ?? false
             )
             cfg.dtype = dtype
+            // QAT bits travel with the model as a config-level toggle
+            // — CLI `--qat int4` can also flip a resume into QAT mode,
+            // which is useful when fine-tuning a previously-fp32 model
+            // into a deployment-int4 one.
+            if let q = qatBits { cfg.qatBits = q }
             model = TinyGPTModel(cfg)
             do { try TinyGPTWeightLoader.load(file, into: model) }
             catch { fputs("error loading weights: \(error)\n", stderr); exit(1) }
@@ -285,6 +307,9 @@ enum Train {
             cfg.useDeepNorm = useDeepNorm
             cfg.lrLayerDecay = lrLayerDecay
             cfg.useEmbeddingRMSNorm = useEmbeddingRMSNorm
+            // QAT bit-width — also must land in cfg BEFORE the model is
+            // built so the attention/MLP modules pick it up at init.
+            cfg.qatBits = qatBits
             model = TinyGPTModel(cfg)
         }
         // MoE checkpoints now serialise — the manifest gains router +
@@ -492,6 +517,7 @@ enum Train {
         deep-norm:     \(cfg.useDeepNorm ? String(format: "on (α=%.3f, β=%.3f)", cfg.deepNormAlpha, cfg.deepNormBeta) : "off")
         layer-lr decay:\(cfg.lrLayerDecay < 0.9999 ? String(format: " %.3f (deepest layer @ full LR, shallowest @ %.1f%%)", cfg.lrLayerDecay, 100 * pow(cfg.lrLayerDecay, Float(cfg.nLayers - 1))) : " off")
         embed RMSNorm: \(cfg.useEmbeddingRMSNorm ? "on" : "off")
+        qat:           \(cfg.qatBits.map { "int\($0) fake-quant + STE on every Linear" } ?? "off")
         save-every:    \(saveEvery.map { "\($0) steps · atomic" } ?? "end only")
         compile:       \(canCompile ? "on" : (galoreActive ? "off (GaLore)" : useSchedule ? "off (LR scheduling)" : "off (gradient accumulation)"))
         device:        \(Device.defaultDevice())
@@ -552,8 +578,19 @@ enum Train {
                 let lrTag = useSchedule ?
                     String(format: "  lr=%.2e", trainer.optimizer.learningRate) : ""
                 let valTag = lastValLoss.map { String(format: "  val %.3f", $0) } ?? ""
-                fputs(String(format: "  step %5d/%5d  loss %.3f%@%@  · %.1f step/s · eta %.0fs\n",
-                             step + 1, steps, lastLoss, lrTag, valTag, stepsPerSec, eta), stderr)
+                // QAT diagnostic: relative |W − fakeQuant(W)| / |W| averaged
+                // across the first attention block's q_proj weight. The
+                // value is BOUNDED by (1/2) · scale / |W_typical| ≈ 1/qMax,
+                // so an int4 run should sit around 1/14 ≈ 0.07 and a
+                // converged QAT run trends lower as the optimiser learns
+                // grid-friendly weights.
+                let qatTag: String
+                if let bits = cfg.qatBits, let firstBlock = model.blocks.first {
+                    let err = QAT.relativeError(firstBlock.attn.qProj.weight, bits: bits)
+                    qatTag = String(format: "  qat-err %.3f", err)
+                } else { qatTag = "" }
+                fputs(String(format: "  step %5d/%5d  loss %.3f%@%@%@  · %.1f step/s · eta %.0fs\n",
+                             step + 1, steps, lastLoss, lrTag, valTag, qatTag, stepsPerSec, eta), stderr)
             }
             if (step + 1) % sampleEvery == 0 || step == steps - 1 {
                 // Inline sample only meaningful for byte-level — BPE prints
@@ -851,6 +888,14 @@ enum Train {
                                            exchange for dramatically lower activation
                                            memory — unlocks bigger models / batches at
                                            the cost of speed.
+          --qat int4|int8                 Quantization-Aware Training: each Linear's
+                                           weight is fake-quantised on every forward
+                                           (round-to-nearest in a per-output-row int
+                                           grid, then dequantise to fp32). Backward
+                                           pass uses the straight-through estimator —
+                                           gradients flow through unchanged. Improves
+                                           downstream int-deployment quality at the
+                                           cost of ~5-10% per step.
 
         Stability / memory (Tier 2):
           --galore-rank R                 GaLore (Zhao et al., 2024): project each 2-D

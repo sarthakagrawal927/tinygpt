@@ -54,7 +54,9 @@ public final class TransformerBlockHF: Module {
         self._ln1.wrappedValue = RMSNorm(dimensions: cfg.dModel, eps: 1e-5)
         self._attn.wrappedValue = CausalSelfAttention(cfg)
         self._ln2.wrappedValue = RMSNorm(dimensions: cfg.dModel, eps: 1e-5)
-        self._mlp.wrappedValue = SwiGLU(dModel: cfg.dModel, dMlp: cfg.dMlp, bias: false)
+        let swiglu = SwiGLU(dModel: cfg.dModel, dMlp: cfg.dMlp, bias: false)
+        swiglu.qatBits = cfg.qatBits
+        self._mlp.wrappedValue = swiglu
         if cfg.useYOCO && yocoSecondHalf {
             self._crossAttn.wrappedValue = CrossAttention(cfg)
         } else {

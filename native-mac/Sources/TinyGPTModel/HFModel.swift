@@ -259,13 +259,101 @@ public enum HFModelLoader {
             }
         }
 
+        // GPTQ / AWQ detection pass. Both formats fan out a single
+        // `{name}.weight` Linear into a packed quartet/triple:
+        //   GPTQ: qweight + scales + qzeros (+ optional g_idx)
+        //   AWQ : qweight + scales + qzeros
+        // We dequantise to dense fp32 here so the rest of the loader
+        // pipeline (param-name mapping, update apply) sees a normal
+        // `{name}.weight` tensor and Just Works. Memory cost: ~8× the
+        // packed payload during load (8-bit nibbles → 32-bit floats).
+        // Inference speedup is queued behind a packed-int4 matmul kernel.
+        var dequantised: [String: MLXArray] = [:]  // hfName -> dense weight
+        var dequantisedBases: Set<String> = []      // base names whose quartet is consumed
+        let allNames = Array(sources.keys)
+        let gptqBases = GPTQReader.detectGptqBases(in: allNames)
+        let awqBases = AWQReader.detectAwqBases(in: allNames)
+        // GPTQ first — when both readers detect a base (the format is
+        // ambiguous on tensor names alone), prefer GPTQ because the
+        // `g_idx` sibling is GPTQ-specific. Pure-AWQ checkpoints lack g_idx.
+        for base in gptqBases {
+            // Skip if this base looks more like AWQ (has scales but
+            // NEVER ships a g_idx in the dir — both formats share the
+            // qweight/scales/qzeros triple, so detect via g_idx presence
+            // OR config.json's quant_method when present).
+            guard let qwSrc = sources[base + ".qweight"],
+                  let scSrc = sources[base + ".scales"],
+                  let qzSrc = sources[base + ".qzeros"] else { continue }
+            let gIdxSrc = sources[base + ".g_idx"]
+            // Heuristic: presence of g_idx → definitely GPTQ. Absence of
+            // g_idx AND awqBases contains this base AND the user's
+            // config.json says quant_method=awq → leave for AWQ pass.
+            // For this drop we go GPTQ-first as a conservative default;
+            // a future revision can read config.json's quant_config.
+            if gIdxSrc == nil && awqBases.contains(base) {
+                // Defer to AWQ pass.
+                continue
+            }
+            let qw = GPTQTensor(shape: qwSrc.info.shape, dtype: qwSrc.info.dtype,
+                                 bytes: qwSrc.file.tensorData(base + ".qweight")!)
+            let sc = GPTQTensor(shape: scSrc.info.shape, dtype: scSrc.info.dtype,
+                                 bytes: scSrc.file.tensorData(base + ".scales")!)
+            let qz = GPTQTensor(shape: qzSrc.info.shape, dtype: qzSrc.info.dtype,
+                                 bytes: qzSrc.file.tensorData(base + ".qzeros")!)
+            let g = gIdxSrc.map {
+                GPTQTensor(shape: $0.info.shape, dtype: $0.info.dtype,
+                            bytes: $0.file.tensorData(base + ".g_idx")!)
+            }
+            let dense: MLXArray
+            do {
+                dense = try GPTQReader.dequantize(qweight: qw, scales: sc, qzeros: qz, gIdx: g)
+            } catch {
+                // Hard fail — the user explicitly downloaded a quantised
+                // model; silently falling back would produce garbage.
+                fatalError("GPTQ dequant failed for \(base): \(error)")
+            }
+            dequantised[base + ".weight"] = dense
+            dequantisedBases.insert(base)
+        }
+        // AWQ pass — any base GPTQ skipped (no g_idx + detected by AWQ).
+        for base in awqBases where !dequantisedBases.contains(base) {
+            guard let qwSrc = sources[base + ".qweight"],
+                  let scSrc = sources[base + ".scales"],
+                  let qzSrc = sources[base + ".qzeros"] else { continue }
+            let qw = AWQTensor(shape: qwSrc.info.shape, dtype: qwSrc.info.dtype,
+                                bytes: qwSrc.file.tensorData(base + ".qweight")!)
+            let sc = AWQTensor(shape: scSrc.info.shape, dtype: scSrc.info.dtype,
+                                bytes: scSrc.file.tensorData(base + ".scales")!)
+            let qz = AWQTensor(shape: qzSrc.info.shape, dtype: qzSrc.info.dtype,
+                                bytes: qzSrc.file.tensorData(base + ".qzeros")!)
+            let dense: MLXArray
+            do {
+                dense = try AWQReader.dequantize(qweight: qw, scales: sc, qzeros: qz)
+            } catch {
+                fatalError("AWQ dequant failed for \(base): \(error)")
+            }
+            dequantised[base + ".weight"] = dense
+            dequantisedBases.insert(base)
+        }
+
         // Build the flat update dict using OUR HFModel's parameter names.
         // TinyGPTModelHF's @ModuleInfo keys are HF-native ("embed_tokens",
         // "layers", "norm", "self_attn", "input_layernorm" …) so the only
         // transform needed is stripping the "model." prefix that HF
         // safetensors prepends. lm_head.weight has no prefix.
         var updates: [String: MLXArray] = [:]
+        // Quartet tensor suffixes we should skip — they were consumed by
+        // the GPTQ/AWQ dequant pass above and the dense replacement lives
+        // in `dequantised`.
+        let quantSuffixes = [".qweight", ".scales", ".qzeros", ".g_idx"]
         for (hfName, src) in sources {
+            // Skip quartet members that have been folded into a dense
+            // .weight by the dequant pass.
+            let base: String? = quantSuffixes.first(where: { hfName.hasSuffix($0) })
+                .map { String(hfName.dropLast($0.count)) }
+            if let b = base, dequantisedBases.contains(b) {
+                continue
+            }
             let key: String
             if hfName.hasPrefix("model.") {
                 key = String(hfName.dropFirst("model.".count))
@@ -280,6 +368,14 @@ public enum HFModelLoader {
             let bytes = src.file.tensorData(hfName)!
             let array = makeMLXArray(bytes: bytes, dtype: src.info.dtype, shape: src.info.shape)
             updates[key] = array
+        }
+        // Splice in the dequantised dense weights under the .weight key
+        // (with the same "model." prefix stripping rule).
+        for (hfName, arr) in dequantised {
+            let key = hfName.hasPrefix("model.")
+                ? String(hfName.dropFirst("model.".count))
+                : hfName
+            updates[key] = arr
         }
 
         // Apply the parameter updates to the model.

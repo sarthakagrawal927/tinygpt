@@ -134,6 +134,23 @@ public struct ModelConfig: Sendable, Equatable {
     /// hint only — has no effect on training.
     public var kviBits: Int?
 
+    /// Quantization-Aware Training bit-width. `nil` (default) = QAT off.
+    /// 4 or 8: every Linear's `weight` gets a fake-quant pass on every
+    /// forward — round-to-nearest in a per-output-row min/max grid, then
+    /// dequantise back to fp32. The straight-through estimator (STE) is
+    /// implemented via `weight + stopGradient(fakeQuant − weight)` so
+    /// the forward sees the quantised weight but the backward routes
+    /// gradients to the original fp32 weight, allowing the optimizer to
+    /// learn around the quantisation noise.
+    ///
+    /// Inference-time win: a model trained with QAT degrades far less
+    /// when finally serialised at the matching int bit-width than one
+    /// trained at fp32 and quantised post-hoc. The training-time cost is
+    /// ~5-10% per step (one extra round + cast per Linear per forward).
+    /// Travels in the .tinygpt header so a `--resume` keeps the same
+    /// fake-quant regime.
+    public var qatBits: Int?
+
     /// Default StreamingLLM sink + window for sample-time KV cache.
     /// `nil` = unbounded growth (historical default). Inference-time
     /// hint only; `tinygpt sample` flags override.
@@ -269,8 +286,10 @@ public struct ModelConfig: Sendable, Equatable {
         zLossWeight: Float = 0,
         useDeepNorm: Bool = false,
         lrLayerDecay: Float = 1.0,
-        useEmbeddingRMSNorm: Bool = false
+        useEmbeddingRMSNorm: Bool = false,
+        qatBits: Int? = nil
     ) {
+        self.qatBits = qatBits
         self.kviBits = kviBits
         self.streamingSink = streamingSink
         self.streamingWindow = streamingWindow

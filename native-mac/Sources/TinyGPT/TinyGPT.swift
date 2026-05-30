@@ -38,6 +38,15 @@ struct TinyGPT {
         // TODO(score-bench-merge): once review is happy, move the dispatch
         // for `score-bench` into the case below (next to `case "eval":`)
         // and delete the pre-switch shim above.
+        //
+        // Same pre-switch shim treatment for `gptq` — the from-scratch
+        // GPTQ worker (Sources/TinyGPT/GPTQ.swift::GPTQWorker.run) is
+        // still smoke-testing, so we dispatch it here rather than wire
+        // a `case "gptq":` inside the switch. See TODO(gptq-cli) below.
+        if cmd == "gptq" {
+            GPTQWorker.run(args: Array(args.dropFirst()))
+            return
+        }
         switch cmd {
         case "inspect":
             guard let path = args.dropFirst().first else {
@@ -76,6 +85,14 @@ struct TinyGPT {
             LASER.run(args: Array(args.dropFirst()))
         case "hqq":
             HQQ.run(args: Array(args.dropFirst()))
+        // TODO(gptq-cli): wire `case "gptq":` here once the from-scratch
+        // GPTQ worker (Sources/TinyGPT/GPTQ.swift::GPTQWorker.run) finishes
+        // its smoke-test cycle. Dispatch shape would be:
+        //     case "gptq":
+        //         GPTQWorker.run(args: Array(args.dropFirst()))
+        // Marker left deliberately so the build still surfaces unused-
+        // file warnings (forcing us to either ship or remove) and so
+        // the help text gets a matching entry in `printUsage`.
         case "magpie":
             Magpie.run(args: Array(args.dropFirst()))
         case "tuned-lens":

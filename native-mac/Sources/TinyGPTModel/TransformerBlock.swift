@@ -45,6 +45,15 @@ public final class CausalSelfAttention: Module {
     @ModuleInfo(key: "v_proj") public var vProj: Linear
     @ModuleInfo(key: "o_proj") public var oProj: Linear
 
+    /// QAT bit-width. `nil` (default) = no fake-quant. When set, every
+    /// Q/K/V/O projection in this attention module routes through
+    /// `QAT.linearForward(...)` so the forward sees the int-rounded
+    /// weight (with STE flowing the gradient through unchanged).
+    /// Mutable so the model can flip QAT mode on/off post-init based
+    /// on `cfg.qatBits` without having to thread the bit-width
+    /// through every constructor.
+    public var qatBits: Int? = nil
+
     public init(_ cfg: ModelConfig) {
         self.nHeads = cfg.nHeads
         self.nKvHeads = cfg.nKvHeads
@@ -61,7 +70,17 @@ public final class CausalSelfAttention: Module {
         self._kProj.wrappedValue = Linear(cfg.dModel, kvDim, bias: cfg.attnBias)
         self._vProj.wrappedValue = Linear(cfg.dModel, kvDim, bias: cfg.attnBias)
         self._oProj.wrappedValue = Linear(cfg.dModel, cfg.dModel, bias: cfg.attnBias)
+        self.qatBits = cfg.qatBits
         super.init()
+    }
+
+    /// Q/K/V/O projection routing — picks between the standard
+    /// `linear(x)` and the QAT-fake-quant variant in one place so the
+    /// three forward variants (standard, anchor-capturing, cross-attn)
+    /// can share the same dispatch logic.
+    @inline(__always) private func proj(_ l: Linear, _ x: MLXArray) -> MLXArray {
+        if let bits = qatBits { return QAT.linearForward(l, x: x, bits: bits) }
+        return l(x)
     }
 
     /// Per-head ALiBi geometric slopes (Press et al., 2021).
@@ -130,9 +149,9 @@ public final class CausalSelfAttention: Module {
         let T = x.shape[1]
         // Q: full nHeads heads. K, V: nKvHeads heads (= nHeads in standard
         // attention; less for Grouped Query Attention).
-        var q = qProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
-        var k = kProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
-        let v = vProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
+        var q = proj(qProj, x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
+        var k = proj(kProj, x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
+        let v = proj(vProj, x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
 
         // RoPE: rotate Q and K (not V) by position-dependent angles.
         // Standard transformers add learned absolute position embeddings
@@ -146,7 +165,7 @@ public final class CausalSelfAttention: Module {
 
         let out = computeSDPA(q: q, k: k, v: v, T: T)
         let merged = out.transposed(0, 2, 1, 3).reshaped([B, T, nHeads * headDim])
-        return oProj(merged)
+        return proj(oProj, merged)
     }
 
     /// YOCO anchor variant — standard self-attention, ALSO returns
@@ -156,9 +175,9 @@ public final class CausalSelfAttention: Module {
     public func forwardCapturingKV(_ x: MLXArray) -> (out: MLXArray, k: MLXArray, v: MLXArray) {
         let B = x.shape[0]
         let T = x.shape[1]
-        var q = qProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
-        var k = kProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
-        let v = vProj(x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
+        var q = proj(qProj, x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
+        var k = proj(kProj, x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
+        let v = proj(vProj, x).reshaped([B, T, nKvHeads, headDim]).transposed(0, 2, 1, 3)
         if useRoPE {
             q = MLXFast.RoPE(q, dimensions: headDim, traditional: false,
                               base: ropeBase, scale: 1.0, offset: 0)
@@ -167,7 +186,7 @@ public final class CausalSelfAttention: Module {
         }
         let out = computeSDPA(q: q, k: k, v: v, T: T)
         let merged = out.transposed(0, 2, 1, 3).reshaped([B, T, nHeads * headDim])
-        return (oProj(merged), k, v)
+        return (proj(oProj, merged), k, v)
     }
 
     /// YOCO cross-attention variant — Q from current x, (K, V) supplied
@@ -178,14 +197,14 @@ public final class CausalSelfAttention: Module {
     public func forwardWithExternalKV(_ x: MLXArray, k: MLXArray, v: MLXArray) -> MLXArray {
         let B = x.shape[0]
         let T = x.shape[1]
-        var q = qProj(x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
+        var q = proj(qProj, x).reshaped([B, T, nHeads, headDim]).transposed(0, 2, 1, 3)
         if useRoPE {
             q = MLXFast.RoPE(q, dimensions: headDim, traditional: false,
                               base: ropeBase, scale: 1.0, offset: 0)
         }
         let out = computeSDPA(q: q, k: k, v: v, T: T)
         let merged = out.transposed(0, 2, 1, 3).reshaped([B, T, nHeads * headDim])
-        return oProj(merged)
+        return proj(oProj, merged)
     }
 
     /// Shared SDPA dispatch — ALiBi → sliding window → plain causal in
@@ -217,14 +236,23 @@ public final class CausalSelfAttention: Module {
 public final class MLP: Module {
     @ModuleInfo(key: "fc_in") public var fcIn: Linear
     @ModuleInfo(key: "fc_out") public var fcOut: Linear
+    /// QAT bit-width. Mirrors the sibling field on CausalSelfAttention —
+    /// when set, fcIn/fcOut route through `QAT.linearForward`.
+    public var qatBits: Int? = nil
 
     public init(_ cfg: ModelConfig) {
         self._fcIn.wrappedValue = Linear(cfg.dModel, cfg.dMlp)
         self._fcOut.wrappedValue = Linear(cfg.dMlp, cfg.dModel)
+        self.qatBits = cfg.qatBits
         super.init()
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
+        if let bits = qatBits {
+            return QAT.linearForward(fcOut,
+                x: gelu(QAT.linearForward(fcIn, x: x, bits: bits)),
+                bits: bits)
+        }
         return fcOut(gelu(fcIn(x)))
     }
 }
@@ -246,6 +274,9 @@ public final class SwiGLU: Module {
     @ModuleInfo(key: "up_proj")   public var fcUp: Linear
     @ModuleInfo(key: "gate_proj") public var fcGate: Linear
     @ModuleInfo(key: "down_proj") public var fcDown: Linear
+    /// QAT bit-width. When set, all three projections route through
+    /// `QAT.linearForward`.
+    public var qatBits: Int? = nil
 
     public init(dModel: Int, dMlp: Int, bias: Bool = false) {
         // SwiGLU MLPs in modern HF models are bias-free (Llama/Mistral
@@ -261,6 +292,11 @@ public final class SwiGLU: Module {
         // multiplied by UP. NOT silu(up) * gate — that's a different (and
         // worse) gating function which compiles fine but produces garbage.
         // Reference: HF transformers' modeling_llama.py LlamaMLP.forward.
+        if let bits = qatBits {
+            let gateOut = QAT.linearForward(fcGate, x: x, bits: bits)
+            let upOut = QAT.linearForward(fcUp, x: x, bits: bits)
+            return QAT.linearForward(fcDown, x: silu(gateOut) * upOut, bits: bits)
+        }
         return fcDown(silu(fcGate(x)) * fcUp(x))
     }
 }
