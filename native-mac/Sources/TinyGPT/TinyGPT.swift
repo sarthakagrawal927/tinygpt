@@ -72,6 +72,22 @@ struct TinyGPT {
             ListDatasets.run(args: Array(args.dropFirst()))
             return
         }
+        // Pre-switch shim for the GitHub data pipeline. Same shim
+        // pattern as download-dataset/list-datasets above: kept on the
+        // safe side of the case list until the corpus extractor is
+        // battle-tested. The actual implementation is in
+        // FetchGitHub.swift (CLI), TinyGPTData/GitHubAPI.swift (REST
+        // client) and TinyGPTData/GitHubCorpus.swift (issue→PR
+        // pairing). Sister agent A5 is concurrently editing the
+        // switch block; the shim keeps merge blast radius zero.
+        // TODO(github-data-merge): once the smoke-test corpus has been
+        // sanity-checked against `tinygpt sft`, move dispatch for
+        // `fetch-github` into the switch (next to `case "hf-load":`)
+        // and delete the shim below. See docs/github_data_integration.md.
+        if cmd == "fetch-github" {
+            FetchGitHub.run(args: Array(args.dropFirst()))
+            return
+        }
         // TODO(hf-datasets-merge): once the HF data pipeline is stable,
         // move dispatch for `download-dataset` and `list-datasets` into
         // the case block below (next to `case "hf-load":`) and remove

@@ -75,7 +75,28 @@ enum ListDatasets {
             for e in entries { printEntryShort(e) }
             print("")
             print("download with:  tinygpt download-dataset hf://datasets/<id>")
+            // For specialists with GitHub recipes (debugger / code), also
+            // list the curated repos. The HF datasets are pre-packaged;
+            // the GitHub recipes are live signal — both belong in the
+            // user's mental model of "where do I get training data for
+            // this specialist".
+            if let spec = specialist {
+                let recipes = GitHubRecipes.entries(for: spec)
+                if !recipes.isEmpty {
+                    print("")
+                    print("github recipes — \(spec.rawValue)  (\(recipes.count) repos)")
+                    print(String(repeating: "-", count: 72))
+                    for r in recipes { printRecipeShort(r) }
+                    print("")
+                    print("fetch with:     tinygpt fetch-github <owner/repo> --kind issues-prs")
+                }
+            }
         }
+    }
+
+    private static func printRecipeShort(_ r: GitHubRecipe) {
+        let kinds = r.recommendedKinds.joined(separator: ",")
+        print("  \(pad(r.repo, 32))  \(pad(r.language, 16))  \(pad(r.approxBugIssues, 26))  \(kinds)")
     }
 
     private static func printEntryShort(_ e: RegistryEntry) {

@@ -269,3 +269,177 @@ public enum DatasetRegistry {
         all.first(where: { $0.id == id })
     }
 }
+
+/// Curated GitHub repositories that produce high-signal training data
+/// for a code-specialist agent (debugger / reviewer / commit-msg). HF
+/// datasets are pre-curated and license-clean; GitHub data is raw and
+/// per-repo licensed — we still recommend a hand-picked shortlist so
+/// users don't have to guess which repos have well-labelled bugs,
+/// review-heavy PRs, etc.
+///
+/// API:
+///   - GitHubRecipes.all                 — every recipe
+///   - GitHubRecipes.entries(for: .debugger)  — filter by specialist
+///   - `tinygpt list-datasets --specialist debugger` includes these.
+///
+/// All recipes are public repos. Fetching with `tinygpt fetch-github`
+/// honours their underlying source license — record metadata carries
+/// `repo` and `kind` so downstream license attribution stays attached.
+public struct GitHubRecipe: Sendable {
+    public let repo: String                  // "owner/name"
+    public let specialists: [DatasetSpecialist]
+    public let language: String
+    public let approxBugIssues: String       // human-readable rough count
+    public let recommendedKinds: [String]    // "issues-prs" | "reviews" | "commits"
+    public let license: String
+    public let notes: String
+    public init(repo: String, specialists: [DatasetSpecialist], language: String,
+                approxBugIssues: String, recommendedKinds: [String],
+                license: String, notes: String) {
+        self.repo = repo; self.specialists = specialists; self.language = language
+        self.approxBugIssues = approxBugIssues; self.recommendedKinds = recommendedKinds
+        self.license = license; self.notes = notes
+    }
+}
+
+public enum GitHubRecipes {
+
+    /// Hand-picked good-bug-fix repos. Bias: well-labelled bug
+    /// trackers, PRs that close issues with a "Fixes #" pattern (so
+    /// issue→PR linkage is high-recall), and permissive licenses.
+    public static let all: [GitHubRecipe] = [
+        // ── Python ML / DL ────────────────────────────────────────
+        GitHubRecipe(
+            repo: "pytorch/pytorch",
+            specialists: [.debugger, .code],
+            language: "python/c++",
+            approxBugIssues: "~10k closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "BSD-3-Clause",
+            notes: "Excellent bug labels. Long PR descriptions, often with reproducer + fix."
+        ),
+        GitHubRecipe(
+            repo: "huggingface/transformers",
+            specialists: [.debugger, .code],
+            language: "python",
+            approxBugIssues: "~6k closed bug issues",
+            recommendedKinds: ["issues-prs", "reviews", "commits"],
+            license: "Apache-2.0",
+            notes: "Heavy review culture — strong PR-review training signal."
+        ),
+        GitHubRecipe(
+            repo: "tensorflow/tensorflow",
+            specialists: [.debugger, .code],
+            language: "python/c++",
+            approxBugIssues: "~15k closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "Apache-2.0",
+            notes: "Enormous corpus; cap with --limit / --since."
+        ),
+        GitHubRecipe(
+            repo: "numpy/numpy",
+            specialists: [.debugger, .code],
+            language: "python/c",
+            approxBugIssues: "~3k closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "BSD-3-Clause",
+            notes: "Stable corpus, careful PRs. Good for numeric-fix learning."
+        ),
+        GitHubRecipe(
+            repo: "scikit-learn/scikit-learn",
+            specialists: [.debugger, .code],
+            language: "python",
+            approxBugIssues: "~2k closed bug issues",
+            recommendedKinds: ["issues-prs"],
+            license: "BSD-3-Clause",
+            notes: "Excellent reviewer culture. Used as one of SWE-bench's source repos."
+        ),
+
+        // ── Rust ──────────────────────────────────────────────────
+        GitHubRecipe(
+            repo: "rust-lang/rust",
+            specialists: [.debugger, .code],
+            language: "rust",
+            approxBugIssues: "~20k closed bug issues",
+            recommendedKinds: ["issues-prs", "reviews", "commits"],
+            license: "MIT/Apache-2.0",
+            notes: "Massive corpus. PR descriptions include 'Fixes #N' consistently."
+        ),
+        GitHubRecipe(
+            repo: "tokio-rs/tokio",
+            specialists: [.debugger, .code],
+            language: "rust",
+            approxBugIssues: "~500 closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "MIT",
+            notes: "Async runtime; subtle concurrency bugs and detailed fix discussion."
+        ),
+
+        // ── Python web / general ──────────────────────────────────
+        GitHubRecipe(
+            repo: "django/django",
+            specialists: [.debugger, .code],
+            language: "python",
+            approxBugIssues: "~5k closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "BSD-3-Clause",
+            notes: "Used by SWE-bench. Mature project, clean PR descriptions."
+        ),
+        GitHubRecipe(
+            repo: "pallets/flask",
+            specialists: [.debugger, .code],
+            language: "python",
+            approxBugIssues: "~400 closed bug issues",
+            recommendedKinds: ["issues-prs"],
+            license: "BSD-3-Clause",
+            notes: "Small enough to fetch fully without much pagination."
+        ),
+        GitHubRecipe(
+            repo: "pandas-dev/pandas",
+            specialists: [.debugger, .code],
+            language: "python",
+            approxBugIssues: "~8k closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "BSD-3-Clause",
+            notes: "Wide range of bug types: indexing, dtype, IO. Used in SWE-bench."
+        ),
+
+        // ── Go / Node / JS ────────────────────────────────────────
+        GitHubRecipe(
+            repo: "golang/go",
+            specialists: [.debugger, .code],
+            language: "go",
+            approxBugIssues: "~15k closed bug issues",
+            recommendedKinds: ["issues-prs", "commits"],
+            license: "BSD-3-Clause",
+            notes: "Use commit log: Go's PR workflow is non-standard (Gerrit), but commits are clean."
+        ),
+        GitHubRecipe(
+            repo: "nodejs/node",
+            specialists: [.debugger, .code],
+            language: "javascript/c++",
+            approxBugIssues: "~5k closed bug issues",
+            recommendedKinds: ["issues-prs", "reviews"],
+            license: "MIT",
+            notes: "Strong review culture — high-quality review-comment dataset."
+        ),
+        GitHubRecipe(
+            repo: "vuejs/core",
+            specialists: [.debugger, .code],
+            language: "typescript",
+            approxBugIssues: "~1k closed bug issues",
+            recommendedKinds: ["issues-prs"],
+            license: "MIT",
+            notes: "Focused frontend bug-fix examples."
+        ),
+    ]
+
+    public static func entries(for specialist: DatasetSpecialist?) -> [GitHubRecipe] {
+        guard let spec = specialist else { return all }
+        return all.filter { $0.specialists.contains(spec) }
+    }
+
+    public static func entry(repo: String) -> GitHubRecipe? {
+        all.first(where: { $0.repo == repo })
+    }
+}
