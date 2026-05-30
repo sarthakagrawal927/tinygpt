@@ -96,6 +96,7 @@ extension TinyGPTModelHF {
         precondition(basePos + T <= config.contextLength,
                      "KV cache + new tokens (\(basePos + T)) exceeds context \(config.contextLength)")
         var x = tokenEmbedding(idx)
+        if let en = embedNorm { x = en(x) }
         if config.useYOCO {
             let anchorIdx = max(0, (blocks.count / 2) - 1)
             for (i, block) in blocks.enumerated() {

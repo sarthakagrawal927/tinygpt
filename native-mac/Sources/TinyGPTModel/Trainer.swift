@@ -155,6 +155,18 @@ public final class Trainer {
     /// transformer-LM default.
     public let gradClipNorm: Float?
 
+    /// GaLore manager — `nil` when GaLore is disabled (the common case
+    /// today). When non-nil, every step projects 2-D weight gradients
+    /// through a rank-R basis before the optimiser sees them.
+    /// See `GaLore.swift` for the details.
+    public let galore: GaLoreManager?
+
+    /// Layer-wise LR decay factor (default 1.0 = no decay). When < 1,
+    /// each block's gradient is multiplied by `factor^(L - 1 - i)` so
+    /// deeper layers get the full LR. Cheap — one MLX scalar multiply
+    /// per leaf.
+    public let lrLayerDecay: Float
+
     /// Compiled (graph-traced) train step. MLX-Swift's `compile` traces the
     /// step the first time it's called and reuses the kernel-launch sequence
     /// thereafter — the single biggest win over an interpreted train loop.
@@ -170,12 +182,16 @@ public final class Trainer {
         eps: Float = 1e-8,
         compileStep: Bool = true,
         gradClipNorm: Float? = nil,
-        optimizer optimizerKind: OptimizerKind = .adamw
+        optimizer optimizerKind: OptimizerKind = .adamw,
+        galore: GaLoreManager? = nil,
+        lrLayerDecay: Float = 1.0
     ) {
         self.model = model
         self.useCompile = compileStep
         self.gradClipNorm = gradClipNorm
         self.optimizerKind = optimizerKind
+        self.galore = galore
+        self.lrLayerDecay = lrLayerDecay
         self.optimizer = makeOptimizer(
             kind: optimizerKind,
             learningRate: learningRate,
@@ -194,28 +210,52 @@ public final class Trainer {
         let optimizer = self.optimizer
         let m = model
         let clip = gradClipNorm
+        let layerDecay = lrLayerDecay
+        let nLayers = model.config.nLayers
+        let galoreMgr = galore
 
-        if compileStep {
+        // GaLore mutates projector state out-of-graph, so it MUST live on
+        // the uncompiled path. Layer-wise LR decay is graph-pure (just a
+        // scalar multiply per leaf) and stays compile-safe.
+        let canCompile = compileStep && galoreMgr == nil
+
+        if canCompile {
             // Compile the full train step so MLX traces it once and reuses
             // the kernel-launch sequence thereafter. `inputs:` and `outputs:`
             // are model and optimizer so the compile knows to handle their
-            // updated state across re-invocations. Clip happens INSIDE the
-            // traced graph, so it costs ~nothing per step after the first.
+            // updated state across re-invocations. Clip + layer-LR scaling
+            // happen INSIDE the traced graph, so they cost ~nothing per
+            // step after the first.
             let compiled = compile(
                 inputs: [m, optimizer],
                 outputs: [m, optimizer]
             ) { (x: MLXArray, y: MLXArray) -> MLXArray in
                 let (loss, grads) = gradFn(m, x, y)
-                let final = clip.map { clipGradNorm(grads, maxNorm: $0) } ?? grads
-                optimizer.update(model: m, gradients: final)
+                var processed = grads
+                processed = clip.map { clipGradNorm(processed, maxNorm: $0) } ?? processed
+                if layerDecay < 0.9999 {
+                    processed = scaleLayerwiseLR(processed, decay: layerDecay, nLayers: nLayers)
+                }
+                optimizer.update(model: m, gradients: processed)
                 return loss
             }
             self.trainStepFn = compiled
         } else {
             self.trainStepFn = { (x: MLXArray, y: MLXArray) -> MLXArray in
                 let (loss, grads) = gradFn(m, x, y)
-                let final = clip.map { clipGradNorm(grads, maxNorm: $0) } ?? grads
-                optimizer.update(model: m, gradients: final)
+                var processed = grads
+                processed = clip.map { clipGradNorm(processed, maxNorm: $0) } ?? processed
+                // GaLore projection happens AFTER clipping so the norm cap
+                // sees the raw gradient (the rank-R version is by
+                // definition a contraction — clipping it twice is fine
+                // but unnecessary).
+                if let g = galoreMgr {
+                    processed = g.processGradients(processed)
+                }
+                if layerDecay < 0.9999 {
+                    processed = scaleLayerwiseLR(processed, decay: layerDecay, nLayers: nLayers)
+                }
+                optimizer.update(model: m, gradients: processed)
                 return loss
             }
         }
@@ -265,6 +305,16 @@ public final class Trainer {
         var avg = accumGrads!.mapValues { (g: MLXArray) -> MLXArray in g * scale }
         if let cn = gradClipNorm {
             avg = clipGradNorm(avg, maxNorm: cn)
+        }
+        // GaLore projection — runs once per *optimiser update*, not once
+        // per micro-batch (the projection is linear, so projecting the
+        // mean is exactly the mean of the projections — same answer,
+        // cheaper).
+        if let g = galore {
+            avg = g.processGradients(avg)
+        }
+        if lrLayerDecay < 0.9999 {
+            avg = scaleLayerwiseLR(avg, decay: lrLayerDecay, nLayers: model.config.nLayers)
         }
         optimizer.update(model: model, gradients: avg)
         eval(model, optimizer)

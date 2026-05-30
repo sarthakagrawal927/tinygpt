@@ -84,6 +84,20 @@ enum Train {
         // Optimiser choice (Lion, Sophia, Muon, Adafactor; default
         // AdamW preserves backward compat). See `Optimizers.swift`.
         var optimizerKind: OptimizerKind = .adamw
+        // GaLore — rank-R projection of 2-D weight gradients
+        // (Zhao et al., 2024). `0` disables; 256 is the paper's
+        // typical setting for transformer pretraining.
+        var galoreRank: Int = 0
+        var galoreUpdateEvery: Int = 200
+        // Z-loss weight (PaLM / GShard). 1e-4 default is conservative;
+        // 0 disables.
+        var zLossWeight: Float = 0
+        // DeepNorm scaling for very deep transformers (Wang et al., 2022).
+        var useDeepNorm: Bool = false
+        // Layer-wise LR decay factor. 1.0 = no decay.
+        var lrLayerDecay: Float = 1.0
+        // Apply RMSNorm right after the token embedding lookup.
+        var useEmbeddingRMSNorm: Bool = false
 
         var i = 0
         while i < args.count {
@@ -122,6 +136,12 @@ enum Train {
                     fputs("unknown --optimizer '\(args[i+1])'. Pick adamw|lion|sophia|muon|adafactor.\n", stderr); exit(2)
                 }
                 optimizerKind = k; i += 2
+            case "--galore-rank":        galoreRank = max(0, Int(args[i+1]) ?? 0); i += 2
+            case "--galore-update-every": galoreUpdateEvery = max(1, Int(args[i+1]) ?? 200); i += 2
+            case "--z-loss-weight":      zLossWeight = max(0, Float(args[i+1]) ?? 0); i += 2
+            case "--deep-norm":          useDeepNorm = true; i += 1
+            case "--lr-layer-decay":     lrLayerDecay = Float(args[i+1]) ?? 1.0; i += 2
+            case "--embedding-rmsnorm":  useEmbeddingRMSNorm = true; i += 1
             case "-h", "--help":  exitUsage()
             default:
                 fputs("unknown flag: \(args[i])\n", stderr); exitUsage()
@@ -166,7 +186,20 @@ enum Train {
                 // resumed long run keeps the same memory profile. CLI
                 // --grad-checkpoint can ALSO promote a non-checkpointed
                 // resume into a checkpointed continuation.
-                useGradCheckpoint: (h.useGradCheckpoint ?? false) || useGradCheckpoint
+                useGradCheckpoint: (h.useGradCheckpoint ?? false) || useGradCheckpoint,
+                // GaLore + stability bells. The architectural flag
+                // (`useEmbeddingRMSNorm`, `useDeepNorm`) MUST come from the
+                // saved manifest because the model layout depends on it.
+                // The training-only knobs (`galoreRank`, `zLossWeight`,
+                // `lrLayerDecay`) take the CLI value if set, else the
+                // saved value — so a resumed run can switch GaLore on /
+                // off mid-training without corrupting weights.
+                galoreRank: galoreRank > 0 ? galoreRank : h.galoreRank,
+                galoreUpdateEvery: h.galoreUpdateEvery ?? galoreUpdateEvery,
+                zLossWeight: zLossWeight > 0 ? zLossWeight : (h.zLossWeight ?? 0),
+                useDeepNorm: h.useDeepNorm ?? false,
+                lrLayerDecay: h.lrLayerDecay ?? lrLayerDecay,
+                useEmbeddingRMSNorm: h.useEmbeddingRMSNorm ?? false
             )
             cfg.dtype = dtype
             model = TinyGPTModel(cfg)
@@ -230,6 +263,18 @@ enum Train {
             // Gradient checkpointing — must be set BEFORE the model is
             // built so each TransformerBlock picks it up at init time.
             cfg.useGradCheckpoint = useGradCheckpoint
+            // Training-stability bells (Tier 2). Architectural flags
+            // (DeepNorm scaling + embedding RMSNorm) MUST be set before
+            // the model is built — they change init / layer wiring.
+            // Training-only knobs (GaLore, z-loss, layer-LR decay) can
+            // be set before or after build; we set them all here for
+            // consistency with the manifest round-trip.
+            cfg.galoreRank = galoreRank > 0 ? galoreRank : nil
+            cfg.galoreUpdateEvery = galoreUpdateEvery
+            cfg.zLossWeight = zLossWeight
+            cfg.useDeepNorm = useDeepNorm
+            cfg.lrLayerDecay = lrLayerDecay
+            cfg.useEmbeddingRMSNorm = useEmbeddingRMSNorm
             model = TinyGPTModel(cfg)
         }
         // MoE checkpoints now serialise — the manifest gains router +
@@ -351,12 +396,24 @@ enum Train {
             maxLR: maxLR, minLR: minLR
         ) : maxLR
         let B = batchSize ?? defaultBatch(cfg)
-        let canCompile = !useSchedule && accumSteps == 1
+        // GaLore mutates its projector state out-of-graph, so it forces
+        // the uncompiled path. Same constraint as LR scheduling /
+        // gradient accumulation.
+        let galoreActive = (cfg.galoreRank ?? 0) > 0
+        let canCompile = !useSchedule && accumSteps == 1 && !galoreActive
         let effectiveClip: Float? = gradClipNorm > 0 ? gradClipNorm : nil
+        // Build the GaLore manager iff requested. Pass `nil` when off
+        // — the trainer treats it as a no-op.
+        let galoreManager: GaLoreManager? = galoreActive
+            ? GaLoreManager(rank: cfg.galoreRank!,
+                             updateEvery: cfg.galoreUpdateEvery ?? 200)
+            : nil
         let trainer = Trainer(model: model, learningRate: initialLR,
                               compileStep: canCompile,
                               gradClipNorm: effectiveClip,
-                              optimizer: optimizerKind)
+                              optimizer: optimizerKind,
+                              galore: galoreManager,
+                              lrLayerDecay: cfg.lrLayerDecay)
 
         let effB = B * accumSteps
         print("""
@@ -375,8 +432,13 @@ enum Train {
         optimizer:     \(optimizerKind.rawValue)
         grad clip:     \(effectiveClip.map { "global L2 ≤ \($0)" } ?? "off")
         grad ckpt:     \(cfg.useGradCheckpoint ? "on (per-block VJP recompute · ~30% slower, ~√L activation mem)" : "off")
+        galore:        \(galoreActive ? "rank=\(cfg.galoreRank!) · refresh every \(cfg.galoreUpdateEvery ?? 200) steps" : "off")
+        z-loss:        \(cfg.zLossWeight > 0 ? String(format: "weight=%.1e", cfg.zLossWeight) : "off")
+        deep-norm:     \(cfg.useDeepNorm ? String(format: "on (α=%.3f, β=%.3f)", cfg.deepNormAlpha, cfg.deepNormBeta) : "off")
+        layer-lr decay:\(cfg.lrLayerDecay < 0.9999 ? String(format: " %.3f (deepest layer @ full LR, shallowest @ %.1f%%)", cfg.lrLayerDecay, 100 * pow(cfg.lrLayerDecay, Float(cfg.nLayers - 1))) : " off")
+        embed RMSNorm: \(cfg.useEmbeddingRMSNorm ? "on" : "off")
         save-every:    \(saveEvery.map { "\($0) steps · atomic" } ?? "end only")
-        compile:       \(canCompile ? "on" : (useSchedule ? "off (LR scheduling)" : "off (gradient accumulation)"))
+        compile:       \(canCompile ? "on" : (galoreActive ? "off (GaLore)" : useSchedule ? "off (LR scheduling)" : "off (gradient accumulation)"))
         device:        \(Device.defaultDevice())
 
         """)
@@ -498,6 +560,12 @@ enum Train {
                       formatBytes(snap.activeMemory),
                       formatBytes(snap.cacheMemory),
                       cfg.useGradCheckpoint ? "  · grad-checkpoint=on" : ""))
+        // GaLore memory budget — what a fully-GaLore-aware optimiser
+        // WOULD use for the 2-D weight params. Compare against the
+        // raw AdamW state for the same params.
+        if let gm = galoreManager {
+            print(gm.summary())
+        }
 
         // Final save (always — covers both completion and Ctrl-C cases).
         if let out = outPath {
@@ -558,6 +626,13 @@ enum Train {
         let C = cfg.dModel, M = cfg.dMlp
         push("token_embedding.weight", [cfg.vocabSize, C])
         push("position_embedding.weight", [cfg.contextLength, C])
+        // Embedding-output RMSNorm — only present when the model was
+        // built with `useEmbeddingRMSNorm`. Stored RIGHT AFTER the
+        // embedding tables (and BEFORE the per-block entries) so the
+        // tensor offset layout stays deterministic.
+        if cfg.useEmbeddingRMSNorm {
+            push("embed_norm.weight", [C])
+        }
         push("ln_final.weight", [C])
         push("ln_final.bias", [C])
         for i in 0..<cfg.nLayers {
@@ -626,7 +701,7 @@ enum Train {
             return false
         }
         if name.hasSuffix(".ln1.weight") || name.hasSuffix(".ln2.weight")
-            || name == "ln_final.weight" {
+            || name == "ln_final.weight" || name == "embed_norm.weight" {
             return false
         }
         return true
@@ -713,6 +788,32 @@ enum Train {
                                            exchange for dramatically lower activation
                                            memory — unlocks bigger models / batches at
                                            the cost of speed.
+
+        Stability / memory (Tier 2):
+          --galore-rank R                 GaLore (Zhao et al., 2024): project each 2-D
+                                           weight gradient through a rank-R subspace
+                                           before AdamW. Full fine-tuning at LoRA-rank-R
+                                           optimiser memory budget. 256 is the paper
+                                           default for pretraining. Forces compile off.
+          --galore-update-every K         Refresh the GaLore projection basis every K
+                                           steps via SVD of the current gradient. 200
+                                           default; larger = more stable but slower
+                                           adaptation.
+          --z-loss-weight F               Add `F · (log Σ exp(logit))²` to the loss
+                                           (PaLM / GShard). 1e-4 keeps logit magnitudes
+                                           bounded; 0 disables.
+          --deep-norm                     DeepNorm scaling for the residual stream
+                                           (Wang et al., 2022). α = (2L)^¼ multiplies
+                                           the residual; β = (8L)^(-¼) scales v_proj /
+                                           o_proj / down_proj init. Stabilises VERY
+                                           deep (>100 layer) transformers.
+          --lr-layer-decay F              Layer-wise LR decay factor (0 < F ≤ 1). Each
+                                           block's gradient is multiplied by
+                                           F^(L - 1 - i) so deeper blocks update at
+                                           the full LR. 0.85 typical for fine-tuning.
+          --embedding-rmsnorm             Apply RMSNorm to the token-embedding output
+                                           before positional addition. Lands a new
+                                           `embed_norm.weight` tensor in the manifest.
 
         Long-run safety nets:
           --resume <path.tinygpt>         Continue from a saved checkpoint

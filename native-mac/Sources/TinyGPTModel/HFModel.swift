@@ -27,6 +27,14 @@ public final class TinyGPTModelHF: Module {
     @ModuleInfo(key: "norm")         public var lnFinal: RMSNorm
     @ModuleInfo(key: "lm_head")      public var lmHead: Linear?
 
+    /// Optional RMSNorm on the embedding output. Same role as the
+    /// matching slot on `TinyGPTModel`. Populated when
+    /// `cfg.useEmbeddingRMSNorm`. Outside the HF safetensors naming
+    /// convention (HF doesn't ship this layer), so an HF-loaded
+    /// model that ENABLES it via the manifest gets a fresh weight
+    /// initialised to ones — the HF load path doesn't touch it.
+    @ModuleInfo(key: "embed_norm")   public var embedNorm: RMSNorm?
+
     /// NEFTune (Jain et al., 2024) — scale of uniform noise added to the
     /// token-embedding output during forward. 0 (default) = off. See the
     /// matching field on `TinyGPTModel`.
@@ -50,6 +58,11 @@ public final class TinyGPTModelHF: Module {
         } else {
             self._lmHead.wrappedValue = Linear(cfg.dModel, cfg.vocabSize, bias: false)
         }
+        if cfg.useEmbeddingRMSNorm {
+            self._embedNorm.wrappedValue = RMSNorm(dimensions: cfg.dModel, eps: 1e-5)
+        } else {
+            self._embedNorm.wrappedValue = nil
+        }
         super.init()
     }
 
@@ -61,6 +74,11 @@ public final class TinyGPTModelHF: Module {
             let s = nefTuneAlpha / sqrt(Float(T * config.dModel))
             let noise = MLXRandom.uniform(low: -s, high: s, x.shape).asType(x.dtype)
             x = x + noise
+        }
+        // Optional embedding-output RMSNorm. See the matching slot on
+        // TinyGPTModel for the rationale.
+        if let en = embedNorm {
+            x = en(x)
         }
         if config.useYOCO {
             // YOCO orchestration: first half runs standard self-attention;
@@ -101,6 +119,25 @@ public final class TinyGPTModelHF: Module {
             total += p.shape.reduce(1, *)
         }
         return total
+    }
+
+    /// Cross-entropy + optional z-loss. Parallel to `TinyGPTModel.loss`
+    /// but without the MTP / MoE branches (HF model doesn't host either
+    /// yet). Used by `TrainerHF` when a non-zero `zLossWeight` is set.
+    public func loss(_ idx: MLXArray, _ targets: MLXArray) -> MLXArray {
+        let logits = self(idx)
+        let v = logits.shape.last!
+        let ce = crossEntropy(
+            logits: logits.reshaped([-1, v]),
+            targets: targets.reshaped([-1]),
+            reduction: .mean
+        )
+        if config.zLossWeight <= 0 { return ce }
+        let flat = logits.reshaped([-1, v])
+        let maxLogit = flat.max(axis: -1, keepDims: true)
+        let shifted = flat - maxLogit
+        let lse = MLX.log(MLX.exp(shifted).sum(axis: -1, keepDims: true)) + maxLogit
+        return ce + MLXArray(config.zLossWeight) * (lse * lse).mean()
     }
 }
 

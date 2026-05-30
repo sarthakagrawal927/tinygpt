@@ -131,7 +131,15 @@ enum TrainSupport {
                 // older readers round-trip unchanged.
                 kviBits: cfg.kviBits,
                 streamingSink: cfg.streamingSink,
-                streamingWindow: cfg.streamingWindow
+                streamingWindow: cfg.streamingWindow,
+                // Tier 2 stability bells. Nil when off so old readers
+                // round-trip cleanly.
+                galoreRank: cfg.galoreRank,
+                galoreUpdateEvery: cfg.galoreRank != nil ? cfg.galoreUpdateEvery : nil,
+                zLossWeight: cfg.zLossWeight > 0 ? cfg.zLossWeight : nil,
+                useDeepNorm: cfg.useDeepNorm ? true : nil,
+                lrLayerDecay: cfg.lrLayerDecay < 0.9999 ? cfg.lrLayerDecay : nil,
+                useEmbeddingRMSNorm: cfg.useEmbeddingRMSNorm ? true : nil
             ),
             manifest: entries,
             savedAt: ISO8601DateFormatter().string(from: Date()),

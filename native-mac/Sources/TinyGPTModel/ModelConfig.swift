@@ -140,7 +140,66 @@ public struct ModelConfig: Sendable, Equatable {
     public var streamingSink: Int?
     public var streamingWindow: Int?
 
+    // MARK: - Training-stability bells (Tier 2)
+    //
+    // The five knobs below are TRAINING-TIME features; they don't
+    // change the saved parameter layout. They survive a save/load
+    // round-trip via the manifest so a `--resume` continues with
+    // the same regimen, but they don't appear as tensors.
+
+    /// GaLore rank — when > 0, the trainer wraps each 2-D weight
+    /// matrix's gradient in a rank-R projection before the optimiser
+    /// step (Zhao et al., 2024). `nil` / 0 = disabled.
+    public var galoreRank: Int?
+
+    /// GaLore basis refresh cadence (steps). nil = default 200.
+    public var galoreUpdateEvery: Int?
+
+    /// Z-loss weight (PaLM / GShard). When > 0, the loss adds
+    /// `weight · (log Σ exp(logit))^2` so logits don't drift to
+    /// magnitudes that destabilise the softmax. 1e-4 is the PaLM
+    /// recipe.
+    public var zLossWeight: Float
+
+    /// DeepNorm residual scaling flag (Wang et al., 2022). When set,
+    /// the residual path scales by α = (2L)^(1/4) and specific
+    /// projections init by β = (8L)^(-1/4). Stabilises training of
+    /// VERY deep (>100 layer) transformers. Visible at init time
+    /// only — no runtime change once weights are trained.
+    public var useDeepNorm: Bool
+
+    /// Layer-wise LR decay factor. When `< 1.0`, each block's
+    /// gradient is scaled by `factor^(nLayers - 1 - i)` so shallow
+    /// blocks update slower than deep blocks. Standard fine-tuning
+    /// lever; 0.85-0.95 typical.
+    public var lrLayerDecay: Float
+
+    /// Apply an RMSNorm right after the token embedding lookup.
+    /// Recent (2025) papers show this stabilises early-training
+    /// loss on long-context transformers. Adds one `d_model`-shaped
+    /// weight to the model — small, but it DOES land in the manifest
+    /// when set, so a checkpoint trained without it can't be resumed
+    /// with it on (the manifest entries would mismatch).
+    public var useEmbeddingRMSNorm: Bool
+
     public var headDim: Int { dModel / nHeads }
+
+    /// DeepNorm α — multiplier on the *residual* (the running x) at
+    /// every sub-layer (Wang et al., 2022). For an encoder-only or
+    /// decoder-only stack of N layers, α = (2N)^(1/4). Off-by-default;
+    /// active when `useDeepNorm == true`.
+    public var deepNormAlpha: Float {
+        useDeepNorm ? Foundation.pow(2.0 * Float(nLayers), 0.25) : 1.0
+    }
+
+    /// DeepNorm β — multiplier on the INIT of certain projections
+    /// (v_proj, o_proj, and the MLP down-projection). For a decoder-
+    /// only stack, β = (8N)^(-1/4). The init pulls the variance of
+    /// the residual stream contributions back into the right range
+    /// to balance α. Inactive when `useDeepNorm == false`.
+    public var deepNormBeta: Float {
+        useDeepNorm ? Foundation.pow(8.0 * Float(nLayers), -0.25) : 1.0
+    }
 
     public var mlxDType: DType {
         switch dtype.lowercased() {
@@ -180,11 +239,23 @@ public struct ModelConfig: Sendable, Equatable {
         useGradCheckpoint: Bool = false,
         kviBits: Int? = nil,
         streamingSink: Int? = nil,
-        streamingWindow: Int? = nil
+        streamingWindow: Int? = nil,
+        galoreRank: Int? = nil,
+        galoreUpdateEvery: Int? = nil,
+        zLossWeight: Float = 0,
+        useDeepNorm: Bool = false,
+        lrLayerDecay: Float = 1.0,
+        useEmbeddingRMSNorm: Bool = false
     ) {
         self.kviBits = kviBits
         self.streamingSink = streamingSink
         self.streamingWindow = streamingWindow
+        self.galoreRank = (galoreRank ?? 0) > 0 ? galoreRank : nil
+        self.galoreUpdateEvery = galoreUpdateEvery
+        self.zLossWeight = max(0, zLossWeight)
+        self.useDeepNorm = useDeepNorm
+        self.lrLayerDecay = lrLayerDecay
+        self.useEmbeddingRMSNorm = useEmbeddingRMSNorm
         self.tokenizerSource = tokenizerSource
         self.nExperts = max(1, nExperts)
         self.moeTopK = max(1, min(moeTopK, max(1, nExperts)))

@@ -17,6 +17,13 @@ public final class TinyGPTModel: Module {
     /// embeddings reuse `token_embedding.weight.T` and never allocate this.
     @ModuleInfo(key: "lm_head") public var lmHead: Linear?
 
+    /// Optional RMSNorm applied to the token-embedding output (before
+    /// positional addition). Populated when `cfg.useEmbeddingRMSNorm`.
+    /// Recent (2025) literature shows this stabilises long-context
+    /// training. Adds a `[d_model]` weight tensor to the manifest
+    /// when active — see `Train.manifestEntries`.
+    @ModuleInfo(key: "embed_norm") public var embedNorm: RMSNorm?
+
     /// Extra output heads for Multi-Token Prediction (Gloeckle et al.,
     /// 2024; DeepSeek-V3 popularised). One Linear per horizon beyond 1.
     /// Training-time only: NOT in the .tinygpt manifest, so saved files
@@ -73,6 +80,15 @@ public final class TinyGPTModel: Module {
         } else {
             self._mtpHeads.wrappedValue = nil
         }
+        // Embedding-output RMSNorm — when enabled, normalises the
+        // token-embedding output before positional embeddings are
+        // added. Implemented as a dedicated weight tensor so it
+        // round-trips through the manifest cleanly.
+        if config.useEmbeddingRMSNorm {
+            self._embedNorm.wrappedValue = RMSNorm(dimensions: config.dModel, eps: 1e-5)
+        } else {
+            self._embedNorm.wrappedValue = nil
+        }
         super.init()
         // Note: `python_ref/model.py` applies a GPT-2-style scaled init for
         // residual-path output projections (std = 0.02 / sqrt(2L)). MLX-Swift
@@ -113,6 +129,13 @@ public final class TinyGPTModel: Module {
                 low: -s, high: s, tokEmb.shape
             ).asType(tokEmb.dtype)
             tokEmb = tokEmb + noise
+        }
+        // Optional embedding RMSNorm — normalises the token-embedding
+        // output to unit RMS before the positional embedding is added.
+        // The 2025 long-context training papers attribute a ~5% loss
+        // improvement on very long contexts to this single line.
+        if let en = embedNorm {
+            tokEmb = en(tokEmb)
         }
         var x = tokEmb + posEmb
         if config.useYOCO {
@@ -174,7 +197,9 @@ public final class TinyGPTModel: Module {
                      "sequence length \(T) exceeds context \(config.contextLength)")
         let positions = MLXArray((0..<T).map { Int32($0) })
         let posEmb = positionEmbedding(positions).expandedDimensions(axis: 0)
-        var x = tokenEmbedding(idx) + posEmb
+        var tokEmb = tokenEmbedding(idx)
+        if let en = embedNorm { tokEmb = en(tokEmb) }
+        var x = tokEmb + posEmb
         var states: [MLXArray] = []
         states.reserveCapacity(blocks.count)
         for block in blocks {
@@ -224,10 +249,16 @@ public final class TinyGPTModel: Module {
     /// fires when both are active.
     public func loss(_ idx: MLXArray, _ targets: MLXArray) -> MLXArray {
         let ce: MLXArray
+        // Save logits so z-loss can read them. MTP path computes loss
+        // inline (across H horizons) and can't easily reuse a single
+        // tensor; z-loss in MTP mode samples from the first horizon's
+        // logits only — see `mtpCrossEntropy`.
+        var primaryLogits: MLXArray? = nil
         if config.mtpHorizons > 1 {
             ce = mtpCrossEntropy(idx: idx, targets: targets)
         } else {
             let logits = self(idx)
+            primaryLogits = logits
             let v = logits.shape.last!
             ce = crossEntropy(
                 logits: logits.reshaped([-1, v]),
@@ -235,11 +266,31 @@ public final class TinyGPTModel: Module {
                 reduction: .mean
             )
         }
+        var total = ce
         if config.isMoE {
             let aux = sumMoEAuxLosses(blocks)
-            return ce + MLXArray(config.loadBalanceWeight) * aux
+            total = total + MLXArray(config.loadBalanceWeight) * aux
         }
-        return ce
+        // Z-loss (PaLM / GShard) — penalises (log Σ exp(logit))². Keeps
+        // logit magnitudes from drifting up during training, which would
+        // otherwise spike loss when a softmax saturates.
+        if config.zLossWeight > 0, let logits = primaryLogits {
+            total = total + MLXArray(config.zLossWeight) * zLossTerm(logits: logits)
+        }
+        return total
+    }
+
+    /// Z-loss: mean over (B*T) of `(log Σ exp(logit))²`. MLX lacks a
+    /// native logsumexp op; we implement it as
+    /// `max + log(Σ exp(x - max))` for numerical stability.
+    private func zLossTerm(logits: MLXArray) -> MLXArray {
+        let v = logits.shape.last!
+        let flat = logits.reshaped([-1, v])
+        let maxLogit = flat.max(axis: -1, keepDims: true)
+        let shifted = flat - maxLogit
+        let logSumExp = MLX.log(MLX.exp(shifted).sum(axis: -1, keepDims: true)) + maxLogit
+        let squared = logSumExp * logSumExp
+        return squared.mean()
     }
 
     /// Mean per-horizon CE. Horizon `h` (1-indexed) predicts the token

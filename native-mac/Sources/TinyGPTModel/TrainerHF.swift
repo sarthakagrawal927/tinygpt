@@ -14,6 +14,10 @@ public final class TrainerHF {
     public let optimizerKind: OptimizerKind
     public private(set) var stepCount: Int = 0
     public let gradClipNorm: Float?
+    /// See `Trainer.galore` for the rationale. Forces uncompiled path.
+    public let galore: GaLoreManager?
+    /// See `Trainer.lrLayerDecay`.
+    public let lrLayerDecay: Float
     private let trainStepFn: (MLXArray, MLXArray) -> MLXArray
 
     public init(model: TinyGPTModelHF,
@@ -23,10 +27,14 @@ public final class TrainerHF {
                 eps: Float = 1e-8,
                 compileStep: Bool = true,
                 gradClipNorm: Float? = nil,
-                optimizer optimizerKind: OptimizerKind = .adamw) {
+                optimizer optimizerKind: OptimizerKind = .adamw,
+                galore: GaLoreManager? = nil,
+                lrLayerDecay: Float = 1.0) {
         self.model = model
         self.gradClipNorm = gradClipNorm
         self.optimizerKind = optimizerKind
+        self.galore = galore
+        self.lrLayerDecay = lrLayerDecay
         self.optimizer = makeOptimizer(
             kind: optimizerKind,
             learningRate: learningRate,
@@ -38,27 +46,39 @@ public final class TrainerHF {
         let opt = self.optimizer
         let clip = gradClipNorm
         let lossFn = { (mod: TinyGPTModelHF, x: MLXArray, y: MLXArray) -> MLXArray in
-            let logits = mod(x)
-            let v = logits.shape.last!
-            return crossEntropy(logits: logits.reshaped([-1, v]),
-                                targets: y.reshaped([-1]),
-                                reduction: .mean)
+            mod.loss(x, y)
         }
         let gradFn = valueAndGrad(model: model, lossFn)
-        if compileStep {
+        let layerDecay = lrLayerDecay
+        let nLayers = model.config.nLayers
+        let galoreMgr = galore
+        // Same constraint as Trainer: GaLore mutates projector state out-of-graph.
+        let canCompile = compileStep && galoreMgr == nil
+        if canCompile {
             self.trainStepFn = compile(
                 inputs: [m, opt], outputs: [m, opt]
             ) { x, y in
                 let (loss, grads) = gradFn(m, x, y)
-                let final = clip.map { clipGradNorm(grads, maxNorm: $0) } ?? grads
-                opt.update(model: m, gradients: final)
+                var processed = grads
+                processed = clip.map { clipGradNorm(processed, maxNorm: $0) } ?? processed
+                if layerDecay < 0.9999 {
+                    processed = scaleLayerwiseLR(processed, decay: layerDecay, nLayers: nLayers)
+                }
+                opt.update(model: m, gradients: processed)
                 return loss
             }
         } else {
             self.trainStepFn = { x, y in
                 let (loss, grads) = gradFn(m, x, y)
-                let final = clip.map { clipGradNorm(grads, maxNorm: $0) } ?? grads
-                opt.update(model: m, gradients: final)
+                var processed = grads
+                processed = clip.map { clipGradNorm(processed, maxNorm: $0) } ?? processed
+                if let g = galoreMgr {
+                    processed = g.processGradients(processed)
+                }
+                if layerDecay < 0.9999 {
+                    processed = scaleLayerwiseLR(processed, decay: layerDecay, nLayers: nLayers)
+                }
+                opt.update(model: m, gradients: processed)
                 return loss
             }
         }

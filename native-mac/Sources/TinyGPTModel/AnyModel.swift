@@ -197,7 +197,17 @@ public enum ModelLoader {
             useMoD: h.useMoD ?? false,
             useDifferentialAttention: h.useDifferentialAttention ?? false,
             useYOCO: h.useYOCO ?? false,
-            useGradCheckpoint: h.useGradCheckpoint ?? false
+            useGradCheckpoint: h.useGradCheckpoint ?? false,
+            // Tier 2 stability bells round-trip through the manifest.
+            // GaLore / z-loss / layer-LR decay are training-only and
+            // don't affect the loaded model's forward; the
+            // architectural flags (DeepNorm, embedding RMSNorm) DO.
+            galoreRank: h.galoreRank,
+            galoreUpdateEvery: h.galoreUpdateEvery,
+            zLossWeight: h.zLossWeight ?? 0,
+            useDeepNorm: h.useDeepNorm ?? false,
+            lrLayerDecay: h.lrLayerDecay ?? 1.0,
+            useEmbeddingRMSNorm: h.useEmbeddingRMSNorm ?? false
         )
         let m = TinyGPTModel(cfg)
         try TinyGPTWeightLoader.load(file, into: m)

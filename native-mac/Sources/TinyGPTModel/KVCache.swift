@@ -566,7 +566,9 @@ extension TinyGPTModel {
                      "KV cache + new tokens (\(basePos + T)) exceeds context \(config.contextLength)")
         let positions = MLXArray((0..<T).map { Int32($0 + basePos) })
         let posEmb = positionEmbedding(positions).expandedDimensions(axis: 0)
-        var x = tokenEmbedding(idx) + posEmb
+        var tokEmb = tokenEmbedding(idx)
+        if let en = embedNorm { tokEmb = en(tokEmb) }
+        var x = tokEmb + posEmb
         if config.useYOCO {
             // Only the FIRST HALF of layers grows the cache. The anchor's
             // post-RoPE K, V come back via `cache.entries[anchorIdx]`

@@ -43,7 +43,11 @@ public final class TransformerBlockHF: Module {
     /// `TransformerBlock` and `GradCheckpoint.swift` for the mechanism.
     public var useGradCheckpoint: Bool = false
 
+    /// DeepNorm α — see the matching field on `TransformerBlock`.
+    public let deepNormAlpha: Float
+
     public init(_ cfg: ModelConfig, yocoSecondHalf: Bool = false) {
+        self.deepNormAlpha = cfg.deepNormAlpha
         // The HF naming convention is `input_layernorm` for ln1 and
         // `post_attention_layernorm` for ln2. We use those keys so
         // safetensors weight names match without re-mapping.
@@ -57,14 +61,30 @@ public final class TransformerBlockHF: Module {
             self._crossAttn.wrappedValue = nil
         }
         super.init()
+
+        // DeepNorm β init — see TransformerBlock for the rationale.
+        // For SwiGLU we scale `down_proj` (the output projection) and,
+        // following the GLM-130B variant, also the v_proj / o_proj of
+        // attention.
+        if cfg.useDeepNorm {
+            let beta = MLXArray(cfg.deepNormBeta)
+            var attnUpd = NestedDictionary<String, Module>()
+            attnUpd["v_proj"] = .value(applyBetaInit(attn.vProj, beta: beta))
+            attnUpd["o_proj"] = .value(applyBetaInit(attn.oProj, beta: beta))
+            attn.update(modules: attnUpd)
+            var mlpUpd = NestedDictionary<String, Module>()
+            mlpUpd["down_proj"] = .value(applyBetaInit(mlp.fcDown, beta: beta))
+            mlp.update(modules: mlpUpd)
+        }
     }
 
     /// YOCO anchor forward — standard self-attn, ALSO returns K, V so
     /// the downstream cross-attn layers can reuse them.
     public func callCapturingKV(_ x: MLXArray) -> (out: MLXArray, k: MLXArray, v: MLXArray) {
         let (attnOut, k, v) = attn.forwardCapturingKV(ln1(x))
-        var y = x + attnOut
-        y = y + mlp(ln2(y))
+        let alphaArr = MLXArray(deepNormAlpha)
+        var y = x * alphaArr + attnOut
+        y = y * alphaArr + mlp(ln2(y))
         return (y, k, v)
     }
 
@@ -77,8 +97,9 @@ public final class TransformerBlockHF: Module {
         } else {
             attnOut = attn.forwardWithExternalKV(ln1(x), k: k, v: v)
         }
-        var y = x + attnOut
-        y = y + mlp(ln2(y))
+        let alphaArr = MLXArray(deepNormAlpha)
+        var y = x * alphaArr + attnOut
+        y = y * alphaArr + mlp(ln2(y))
         return y
     }
 
@@ -103,8 +124,9 @@ public final class TransformerBlockHF: Module {
     /// the wrapper's VJP doesn't recurse.
     public func rawForward(_ x: MLXArray) -> MLXArray {
         var x = x
-        x = x + attn(ln1(x))
-        x = x + mlp(ln2(x))
+        let alphaArr = MLXArray(deepNormAlpha)
+        x = x * alphaArr + attn(ln1(x))
+        x = x * alphaArr + mlp(ln2(x))
         return x
     }
 }

@@ -318,7 +318,12 @@ public final class TransformerBlock: Module {
     /// itself; the model sets it after construction based on the config.
     public var useGradCheckpoint: Bool = false
 
+    /// DeepNorm α — residual multiplier. 1.0 when `cfg.useDeepNorm == false`.
+    /// Read by the forward path inside `blockAfterAttn`.
+    public let deepNormAlpha: Float
+
     public init(_ cfg: ModelConfig, yocoSecondHalf: Bool = false) {
+        self.deepNormAlpha = cfg.deepNormAlpha
         self._ln1.wrappedValue = LayerNorm(dimensions: cfg.dModel, eps: 1e-5)
         self._attn.wrappedValue = CausalSelfAttention(cfg)
         self._ln2.wrappedValue = LayerNorm(dimensions: cfg.dModel, eps: 1e-5)
@@ -353,6 +358,27 @@ public final class TransformerBlock: Module {
             self._crossAttn.wrappedValue = nil
         }
         super.init()
+
+        // DeepNorm β init — applied AFTER super.init via Module's
+        // generic `update(modules:)` API (mutation of a child Linear's
+        // weight after init isn't supported on the raw `let weight`,
+        // so we install a fresh Linear with the scaled weight).
+        // Scales v_proj, o_proj, and the MLP output projection by
+        // β = (8L)^(-1/4). The scaling lands ON the weight tensor, so
+        // a from-scratch run benefits; a `--resume` from a non-DeepNorm
+        // checkpoint does NOT retroactively re-init.
+        if cfg.useDeepNorm {
+            let beta = MLXArray(cfg.deepNormBeta)
+            var attnUpd = NestedDictionary<String, Module>()
+            attnUpd["v_proj"] = .value(applyBetaInit(attn.vProj, beta: beta))
+            attnUpd["o_proj"] = .value(applyBetaInit(attn.oProj, beta: beta))
+            attn.update(modules: attnUpd)
+            if let dense = mlp {
+                var mlpUpd = NestedDictionary<String, Module>()
+                mlpUpd["fc_out"] = .value(applyBetaInit(dense.fcOut, beta: beta))
+                dense.update(modules: mlpUpd)
+            }
+        }
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -427,11 +453,15 @@ public final class TransformerBlock: Module {
     /// flavours of attention — standard, anchor-capturing, cross-attn.
     private func blockAfterAttn(x: MLXArray, attnOut: MLXArray) -> MLXArray {
         let blockIn = x
-        var y = blockIn + attnOut
+        // DeepNorm α — scale the residual by α before adding the
+        // sub-layer output. When the model wasn't configured with
+        // DeepNorm, α == 1.0 and this is a no-op multiply.
+        let alphaArr = MLXArray(deepNormAlpha)
+        var y = blockIn * alphaArr + attnOut
         if let moe = moe {
-            y = y + moe(ln2(y))
+            y = y * alphaArr + moe(ln2(y))
         } else if let mlp = mlp {
-            y = y + mlp(ln2(y))
+            y = y * alphaArr + mlp(ln2(y))
         }
         // MoD soft routing: per-token sigmoid gate scales the block's
         // total delta. gate ≈ 1 → block fires as normal; gate ≈ 0 →

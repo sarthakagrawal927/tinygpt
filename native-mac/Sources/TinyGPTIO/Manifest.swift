@@ -77,6 +77,24 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
         public var streamingSink: Int?
         public var streamingWindow: Int?
 
+        /// GaLore rank — `nil` means standard AdamW. When set, the
+        /// trainer projects each 2-D weight gradient through a rank-R
+        /// basis before the optimiser step (Zhao et al., 2024).
+        public var galoreRank: Int?
+        /// Refresh cadence for the GaLore projection basis (steps).
+        public var galoreUpdateEvery: Int?
+        /// Z-loss weight (PaLM / GShard). `nil` or 0 = disabled.
+        public var zLossWeight: Float?
+        /// DeepNorm flag (Wang et al., 2022). `nil` / false = standard
+        /// transformer init + residual.
+        public var useDeepNorm: Bool?
+        /// Layer-wise LR decay factor. `nil` or 1.0 = no decay.
+        public var lrLayerDecay: Float?
+        /// Embedding-output RMSNorm flag. When true, the model has an
+        /// extra `embed_norm.weight` tensor in the manifest right
+        /// after `token_embedding.weight`.
+        public var useEmbeddingRMSNorm: Bool?
+
         public init(
             layers: Int? = nil,
             dModel: Int? = nil,
@@ -97,11 +115,23 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
             useGradCheckpoint: Bool? = nil,
             kviBits: Int? = nil,
             streamingSink: Int? = nil,
-            streamingWindow: Int? = nil
+            streamingWindow: Int? = nil,
+            galoreRank: Int? = nil,
+            galoreUpdateEvery: Int? = nil,
+            zLossWeight: Float? = nil,
+            useDeepNorm: Bool? = nil,
+            lrLayerDecay: Float? = nil,
+            useEmbeddingRMSNorm: Bool? = nil
         ) {
             self.kviBits = kviBits
             self.streamingSink = streamingSink
             self.streamingWindow = streamingWindow
+            self.galoreRank = galoreRank
+            self.galoreUpdateEvery = galoreUpdateEvery
+            self.zLossWeight = zLossWeight
+            self.useDeepNorm = useDeepNorm
+            self.lrLayerDecay = lrLayerDecay
+            self.useEmbeddingRMSNorm = useEmbeddingRMSNorm
             self.layers = layers
             self.dModel = dModel
             self.ctx = ctx
