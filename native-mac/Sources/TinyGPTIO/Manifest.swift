@@ -219,6 +219,43 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
     /// to the browser's exact field names (which have changed once already).
     public var lossHistoryRaw: Data?
 
+    /// Unstructured-pruning sparsity masks, keyed by tensor name. Each
+    /// value is RLE-encoded 0/1 bytes (one per weight). Present only
+    /// when `tinygpt prune-unstructured` wrote the file. The
+    /// inference path multiplies the loaded weights by the decoded
+    /// mask — already-zeroed weights stay zero, so the mask is
+    /// purely informational at sample time. Its real value is at
+    /// distribution time: a high-sparsity model's mask + zeroed
+    /// weights compress significantly tighter than the original
+    /// dense weights.
+    ///
+    /// Wire format: a JSON object `{tensorName: base64String, ...}`
+    /// where each base64String decodes to the RLE bytes per
+    /// `Pruning.encodeRLE`. Absent on standard checkpoints.
+    public var sparsityMasks: [String: String]?
+
+    /// Pruning-recipe metadata: original sparsity, iterations, etc.
+    /// Travels alongside `sparsityMasks` for inspectability. The
+    /// loader doesn't need this — it's diagnostic only.
+    public var pruningInfo: PruningInfo?
+
+    public struct PruningInfo: Codable, Sendable, Equatable {
+        public var kind: String          // "unstructured" | "structured-head" | "structured-layer"
+        public var sparsity: Float?      // unstructured: fraction zeroed
+        public var iterations: Int?      // unstructured: IMP rounds
+        public var headsDropped: [Int]?  // structured-head: which heads (per layer or globally)
+        public var layersDropped: [Int]? // structured-layer: which layer indices were removed
+
+        public init(kind: String, sparsity: Float? = nil, iterations: Int? = nil,
+                    headsDropped: [Int]? = nil, layersDropped: [Int]? = nil) {
+            self.kind = kind
+            self.sparsity = sparsity
+            self.iterations = iterations
+            self.headsDropped = headsDropped
+            self.layersDropped = layersDropped
+        }
+    }
+
     public init(
         config: Config,
         manifest: [TensorEntry],
@@ -228,7 +265,9 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
         weightDtype: String? = nil,
         includesOptimizerState: Bool? = nil,
         stateByteLength: Int? = nil,
-        lossHistoryRaw: Data? = nil
+        lossHistoryRaw: Data? = nil,
+        sparsityMasks: [String: String]? = nil,
+        pruningInfo: PruningInfo? = nil
     ) {
         self.config = config
         self.manifest = manifest
@@ -239,6 +278,8 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
         self.includesOptimizerState = includesOptimizerState
         self.stateByteLength = stateByteLength
         self.lossHistoryRaw = lossHistoryRaw
+        self.sparsityMasks = sparsityMasks
+        self.pruningInfo = pruningInfo
     }
 
     // Manual decode/encode so we can pass `lossHistory` through as raw JSON
@@ -247,6 +288,7 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
         case config, manifest, savedAt, finalLoss, sample
         case weightDtype, includesOptimizerState, stateByteLength
         case lossHistory
+        case sparsityMasks, pruningInfo
     }
 
     public init(from decoder: any Decoder) throws {
@@ -265,6 +307,8 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
         } else {
             self.lossHistoryRaw = nil
         }
+        self.sparsityMasks = try c.decodeIfPresent([String: String].self, forKey: .sparsityMasks)
+        self.pruningInfo = try c.decodeIfPresent(PruningInfo.self, forKey: .pruningInfo)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -281,6 +325,8 @@ public struct TinyGPTHeader: Codable, Sendable, Equatable {
            let value = try? JSONDecoder().decode(AnyJSON.self, from: raw) {
             try c.encode(value, forKey: .lossHistory)
         }
+        try c.encodeIfPresent(sparsityMasks, forKey: .sparsityMasks)
+        try c.encodeIfPresent(pruningInfo, forKey: .pruningInfo)
     }
 
     /// Convenience: which on-disk body layout the file uses.

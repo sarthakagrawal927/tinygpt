@@ -47,6 +47,23 @@ struct TinyGPT {
             GPTQWorker.run(args: Array(args.dropFirst()))
             return
         }
+        // Pre-switch shim for the pruning subcommands. Same pattern as
+        // score-bench: live behind a shim while the implementation is
+        // baked. TODO(pruning-merge) below removes these once stable.
+        if cmd == "prune-unstructured" {
+            PruneUnstructured.run(args: Array(args.dropFirst()))
+            return
+        }
+        if cmd == "prune-structured" {
+            PruneStructured.run(args: Array(args.dropFirst()))
+            return
+        }
+        // TODO(pruning-merge): move dispatch for `prune-unstructured` and
+        // `prune-structured` into the case below (next to `case "hqq":`)
+        // and delete the pre-switch shim above. The CLI lives behind a
+        // shim because the structured-head path is still shape-preserving
+        // (zero-out, not physical-removal — see docs/pruning.md "Caveats");
+        // when the asymmetric-attention module lands, the case rolls up.
         switch cmd {
         case "inspect":
             guard let path = args.dropFirst().first else {
