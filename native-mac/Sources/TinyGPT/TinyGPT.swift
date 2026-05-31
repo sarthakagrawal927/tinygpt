@@ -93,6 +93,16 @@ struct TinyGPT {
         }
         // TODO(cloud-merge): roll up push/pull/cloud into the switch
         // below once the dispatch pattern is settled.
+        //
+        // Pre-switch shim for cloud-escalation calls. The other half
+        // of the north-star architecture: when the on-device specialist
+        // defers, this is how it reaches a larger remote model
+        // (Claude / GPT). Programmatic use via CloudEscalate.complete()
+        // from AgentLoop; CLI use via `tinygpt escalate`.
+        if cmd == "escalate" {
+            Escalate.run(args: Array(args.dropFirst()))
+            return
+        }
         // Pre-switch shim for the GitHub data pipeline. Same shim
         // pattern as download-dataset/list-datasets above: kept on the
         // safe side of the case list until the corpus extractor is
