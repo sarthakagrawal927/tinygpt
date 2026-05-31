@@ -16,6 +16,21 @@ enum HFInspect {
             fputs("usage: tinygpt hf-inspect <dir-with-config.json-and-safetensors>\n", stderr)
             exit(2)
         }
+        if dirPath == "-h" || dirPath == "--help" {
+            print("""
+            usage: tinygpt hf-inspect <model-dir>
+
+            Inspect a downloaded HuggingFace model directory: prints
+            architecture, vocab size, layer counts, GQA layout, context
+            length, RoPE theta, tied-embedding flag, and confirms
+            whether tinygpt can load it.
+
+            The directory must contain at minimum config.json plus
+            either model.safetensors or a pytorch_model.bin shard set.
+            tokenizer.json is optional but recommended.
+            """)
+            exit(0)
+        }
         let dir = URL(fileURLWithPath: dirPath)
         let configURL = dir.appendingPathComponent("config.json")
         guard FileManager.default.fileExists(atPath: configURL.path) else {

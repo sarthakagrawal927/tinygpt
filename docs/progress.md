@@ -159,6 +159,20 @@ other features confirmed working. See
 **Living backlog** (ROI-ordered): [backlog.md](backlog.md). Top items
 get worked first; sort updates when we learn.
 
+**First specialist run (2026-05-31)**: tool-caller v1 on
+SmolLM2-135M-Instruct + hermes-function-calling-v1 (11k records),
+2000 steps RS-LoRA rank 16, 3.5 MB adapter. Pipeline end-to-end
+works; model picks up surface JSON format but doesn't yet
+functionally tool-call. Major win along the way: found + fixed the
+A0 LoRA-save-empty-entries bug (`f566023`). See
+[specialist_v1_findings.md](specialist_v1_findings.md) for the
+full writeup + ranked next-iteration options.
+
+**Dataset inventory**: see [data_inventory.md](data_inventory.md) —
+22 curated HF datasets, GitHub + BFCL + Magpie pipelines, plus
+the gotchas list (gated datasets need `HF_TOKEN`, parquet shards
+not yet decoded, `/tmp` reaping).
+
 ## Capabilities shipped — Web track
 
 ```

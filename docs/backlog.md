@@ -24,39 +24,15 @@ codebase. Sorted by ROI (impact ÷ cost), not by wave number.
 
 These are the items that, when done, unlock the most downstream value.
 
-### A0. Fix the LoRA-save bug (BLOCKS all PEFT-based specialists)
-**Impact**: every SFT / DPO / finetune adapter saves to disk with
-`entries:[]` — only the header is written, never the A/B matrices.
-Reproduces on **both** the from-scratch and HF Llama paths
-(`tinygpt sft /tmp/bpe-tiny.tinygpt ...` → 211 B file; same on
-SmolLM2 → 217 B file). Training works (loss decreases, trainable
-param count is correct), but the on-disk adapter is empty.
-
-**Root cause hypothesis**: `Module.update(modules: NestedDictionary)`
-doesn't propagate to the @ModuleInfo array property
-(`@ModuleInfo(key: "layers") public var blocks: [...]`) after update.
-Both `LoraInjection` and `LoraInjectionHF` build a `NestedItem` tree
-with `.array(layersList)` at the `layers` key and call update. The
-optimizer + freeze paths somehow find the LoraLinears (trainable
-count is right), but the writer's `model.blocks[i].attn.qProj as?
-LoraLinear` returns nil — suggesting the property accessor returns
-a stale value after update.
-
-**Direct property assignment is blocked** by MLX-Swift with
-`Fatal error: please use Model.update(modules:)`, so the fix needs
-to either (a) understand why `update(modules:)` isn't propagating
-to the array-of-blocks property, or (b) walk `model.modules()` (the
-framework's flat enumeration) to find LoraLinears for saving rather
-than the typed `block.attn.qProj` access.
-
-**Cost**: probably 2-4 hours of MLX-Swift framework debugging +
-adding a save+reload XCTest case so it doesn't regress.
-**Source**: discovered 2026-05-31 while training the first
-specialist. Blocks Tier A1 (debugger specialist) for the LoRA-based
-specialist path.
-
-**Workaround for now**: train from-scratch with `tinygpt train`
-(full-weight save, no LoRA round-trip).
+### ~~A0. Fix the LoRA-save bug~~ — **CLOSED in `f566023`**
+Diagnosis: SFT's curated DoRA-on-by-default wasn't being disabled
+by PEFT-variant flags (`--rs-lora` etc), so the writer's
+`as? LoraLinear` cast missed every `DoraLinear` instance →
+`entries:[]` empty adapter. Fix is one line per PEFT case in
+SFT.swift: also set `useDora = false`. Verified end-to-end:
+3.5 MB adapter persists, reloads, runs. Latent regression-coverage
+gap noted — add a save+reload XCTest (Tier C task) so this can't
+slip again.
 
 ### A1. Train the first specialist end-to-end (tool-caller)
 **Impact**: validates the north-star thesis. Until this happens, every
@@ -220,6 +196,39 @@ TinyGPT.swift to move dispatch into the case block
 the laptop heats up?
 **Cost**: ~1 day
 **Source**: `progress.md` distance-to-targets
+
+### C6. ChatML template: detect inline `system: ...` prefix and split
+**Impact**: hermes-function-calling-v1 (and likely other tool-calling
+datasets converted from `[{role, content}, ...]` arrays) carry the
+system role as a `"system: ..."` prefix inside the `instruction`
+string. The current `.chatml` template wraps it all in
+`<|im_start|>user\n{instruction}<|im_end|>` — burying the system
+role in the user turn. Training still works but inference is
+brittle: test prompts must match the buried-system shape rather
+than proper ChatML role separation, which is a real footgun.
+**Cost**: ~half day. Add a `splitInlineRoles()` pre-step to the
+chatml `render()` that recognises `^system:\s` / `^user:\s` / etc.
+and emits separate `<|im_start|>{role}\n...<|im_end|>` blocks.
+**Source**: discovered while diagnosing `toolcall-v1` — see
+`docs/specialist_v1_findings.md` and `docs/data_inventory.md`
+"Known gotchas" §3.
+
+### C7. Save+reload XCTest for LoRA adapters
+**Impact**: regression coverage for the A0 bug that just landed.
+Currently no test exercises the SFT → save → load → sample roundtrip,
+so silent-empty-adapter regressions could slip again.
+**Cost**: ~2 hours. Write a tiny TinyGPTModelTests.swift case that
+runs 5 SFT steps on a fake corpus, saves the LoRA, applies it back
+to a fresh base, asserts logits differ vs untouched base.
+**Source**: A0 closure note.
+
+### C8. Install-path discipline (no more /tmp for build/data caches)
+**Impact**: macOS reaps `/tmp` aggressively. Lost build cache, eval
+harness, and 50 MB of pulled data mid-session on 2026-05-31. Should
+default to `~/.cache/tinygpt/` for downloads, `~/.local/bin/tinygpt`
+(or similar) for the built binary.
+**Cost**: ~1 hour — defaults change + a one-liner in the README.
+**Source**: discovered 2026-05-31.
 
 ---
 

@@ -195,10 +195,18 @@ struct TinyGPT {
             guard let path = args.dropFirst().first else {
                 fputs("inspect: missing <path>\n", stderr); exit(2)
             }
+            if path == "-h" || path == "--help" {
+                print("usage: tinygpt inspect <path.tinygpt>\n  Prints the file's manifest + metadata.")
+                exit(0)
+            }
             run { try inspect(path: path) }
         case "validate":
             guard let path = args.dropFirst().first else {
                 fputs("validate: missing <path>\n", stderr); exit(2)
+            }
+            if path == "-h" || path == "--help" {
+                print("usage: tinygpt validate <path.tinygpt>\n  Round-trip check: read → encode → byte-compare.\n  Exit 0 iff the file re-encodes bit-identically.")
+                exit(0)
             }
             run { try validate(path: path) }
         case "bench":
