@@ -148,6 +148,14 @@ extension Serve {
         static func boot(modelPath: String, host: String, port: UInt16,
                           maxContextOverride: Int?) throws -> Server
         {
+            // Writes to a socket whose peer has hung up raise SIGPIPE,
+            // which by default kills the process. SSE clients (curl
+            // --max-time, browser fetch().cancel(), user closing a tab)
+            // routinely close mid-stream, so we ignore SIGPIPE
+            // process-wide and rely on write()'s EPIPE return + the
+            // cancellation path in streamChat / streamCompletion.
+            signal(SIGPIPE, SIG_IGN)
+
             // Load model + (optional) BPE tokenizer up front. Same logic as
             // Sample.swift so behaviour matches between `sample` and `serve`.
             let load = try ModelLoader.load(modelPath)
@@ -428,19 +436,25 @@ extension Serve {
                 delta: ["role": "assistant"], finishReason: nil))
 
             var finishReason = "stop"
+            var clientGone = false
             do {
                 try inferenceQueue.sync {
                     try self.generateStreaming(prompt: prompt, maxTokens: maxTokens,
                                                 temperature: temperature, stop: stop)
                     { newText in
-                        self.writeSSEEvent(clientFd: clientFd, payload: self.chunkPayload(
+                        let ok = self.writeSSEEvent(clientFd: clientFd, payload: self.chunkPayload(
                             id: id, object: "chat.completion.chunk",
                             delta: ["content": newText], finishReason: nil))
+                        if !ok { clientGone = true }
+                        return ok
                     }
                 }
             } catch {
                 finishReason = "error"
             }
+            // Client disconnected — don't bother sending final chunk + DONE,
+            // the socket is dead. Just return so the connection closes.
+            if clientGone { return }
             // Final delta with finish_reason — empty delta per OpenAI spec.
             writeSSEEvent(clientFd: clientFd, payload: chunkPayload(
                 id: id, object: "chat.completion.chunk",
@@ -458,6 +472,7 @@ extension Serve {
             writeSSEHead(clientFd: clientFd)
 
             var finishReason = "stop"
+            var clientGone = false
             do {
                 try inferenceQueue.sync {
                     try self.generateStreaming(prompt: prompt, maxTokens: maxTokens,
@@ -474,12 +489,15 @@ extension Serve {
                                 "finish_reason": NSNull()
                             ]]
                         ]
-                        self.writeSSEEvent(clientFd: clientFd, payload: payload)
+                        let ok = self.writeSSEEvent(clientFd: clientFd, payload: payload)
+                        if !ok { clientGone = true }
+                        return ok
                     }
                 }
             } catch {
                 finishReason = "error"
             }
+            if clientGone { return }
             let final: [String: Any] = [
                 "id": id,
                 "object": "text_completion",
@@ -513,12 +531,14 @@ extension Serve {
         }
 
         /// Streaming generation. Calls `onText` with the newly-decoded
-        /// suffix each time a step extends the visible string. The token
-        /// loop is the same as `generate(...)` — extracted into a
+        /// suffix each time a step extends the visible string. The
+        /// callback returns `true` to continue, `false` to abort (used
+        /// to propagate client-disconnect through to early exit). The
+        /// token loop is the same as `generate(...)` — extracted into a
         /// callback-driven variant rather than duplicated.
         func generateStreaming(prompt: String, maxTokens: Int,
                                 temperature: Float, stop: [String],
-                                onText: (String) -> Void) throws
+                                onText: (String) -> Bool) throws
         {
             let promptIds = tokenizer.encode(prompt)
             if promptIds.isEmpty { return }
@@ -557,8 +577,9 @@ extension Serve {
                 if nowDecoded.count > lastDecoded.count
                     && nowDecoded.hasPrefix(lastDecoded) {
                     let suffix = String(nowDecoded.dropFirst(lastDecoded.count))
-                    onText(suffix)
+                    let keepGoing = onText(suffix)
                     lastDecoded = nowDecoded
+                    if !keepGoing { return }  // client disconnected — abort early
                 }
 
                 if !stop.isEmpty {
@@ -570,26 +591,32 @@ extension Serve {
             }
         }
 
-        private func writeSSEHead(clientFd: Int32) {
+        @discardableResult
+        private func writeSSEHead(clientFd: Int32) -> Bool {
             var head = "HTTP/1.1 200 OK\r\n"
             head += "Content-Type: text/event-stream; charset=utf-8\r\n"
             head += "Cache-Control: no-cache\r\n"
             head += "Connection: close\r\n"
             head += "X-Accel-Buffering: no\r\n"  // tell reverse-proxies not to buffer
             head += "\r\n"
-            writeAll(clientFd: clientFd, data: Data(head.utf8))
+            return writeAll(clientFd: clientFd, data: Data(head.utf8))
         }
 
-        private func writeSSEEvent(clientFd: Int32, payload: [String: Any]) {
-            guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        /// Returns true if the event was delivered, false if the client
+        /// has disconnected. Streaming endpoints use the return value to
+        /// short-circuit the generation loop when the user aborts.
+        @discardableResult
+        private func writeSSEEvent(clientFd: Int32, payload: [String: Any]) -> Bool {
+            guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return false }
             var frame = "data: ".data(using: .utf8)!
             frame.append(data)
             frame.append(Data("\n\n".utf8))
-            writeAll(clientFd: clientFd, data: frame)
+            return writeAll(clientFd: clientFd, data: frame)
         }
 
-        private func writeSSETerminator(clientFd: Int32) {
-            writeAll(clientFd: clientFd, data: Data("data: [DONE]\n\n".utf8))
+        @discardableResult
+        private func writeSSETerminator(clientFd: Int32) -> Bool {
+            return writeAll(clientFd: clientFd, data: Data("data: [DONE]\n\n".utf8))
         }
 
         private func readStopParam(_ raw: Any?) -> [String] {
@@ -724,16 +751,24 @@ extension Serve {
             writeAll(clientFd: clientFd, data: data)
         }
 
-        private func writeAll(clientFd: Int32, data: Data) {
+        /// Write all bytes to the client socket. Returns true on success,
+        /// false if the peer disconnected mid-write (write returned 0 or
+        /// -1 with errno=EPIPE/ECONNRESET). Callers that care about
+        /// peer-gone (the streaming endpoints) check this to abort the
+        /// generation loop early.
+        @discardableResult
+        private func writeAll(clientFd: Int32, data: Data) -> Bool {
+            var ok = true
             data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-                guard let base = raw.baseAddress else { return }
+                guard let base = raw.baseAddress else { ok = false; return }
                 var sent = 0
                 while sent < data.count {
                     let n = Darwin.write(clientFd, base.advanced(by: sent), data.count - sent)
-                    if n <= 0 { return }
+                    if n <= 0 { ok = false; return }
                     sent += n
                 }
             }
+            return ok
         }
 
         private func httpStatusText(_ code: Int) -> String {
