@@ -150,6 +150,25 @@ struct TinyGPT {
         // companion Sample.swift flag additions land (A3), move dispatch
         // for `agent` into the switch below (next to `case "sample":`)
         // and delete the pre-switch shim above.
+        //
+        // Pre-switch shim for the Wave 2.6 screen-reading scaffold.
+        //   tinygpt screen capture --out window.png       — PNG via ScreenCaptureKit
+        //   tinygpt screen tree    [--out tree.json]      — AX tree as JSON
+        //   tinygpt screen both    --out-dir /tmp/snap    — both, side-by-side
+        // Module: TinyGPTScreen (ScreenCapture.swift + AccessibilityTree.swift).
+        // CLI handler: Sources/TinyGPT/Screen.swift. Permissions are surfaced
+        // with clear remediation rather than crashing. See TODO(screen-merge)
+        // below for the eventual roll-up into the main switch.
+        if cmd == "screen" {
+            Screen.run(args: Array(args.dropFirst()))
+            return
+        }
+        // TODO(screen-merge): once the screen-reading bundle (capture +
+        // AX tree + vision-encoder integration) is stable, move dispatch
+        // for `screen` into the switch below (next to `case "sample":`)
+        // and delete the pre-switch shim above. Until then the shim keeps
+        // the switch surface stable for the other concurrently-edited
+        // subcommands.
         switch cmd {
         case "inspect":
             guard let path = args.dropFirst().first else {
@@ -174,6 +193,12 @@ struct TinyGPT {
             Train.run(args: Array(args.dropFirst()))
         case "eval":
             Eval.run(args: Array(args.dropFirst()))
+        case "eval-indic":
+            // Indic-language eval harness: MILU (multi-choice across 11
+            // Indic langs) + IndicGenBench (29-lang generative tasks).
+            // Required by Wave 4 before claiming Hindi/multilingual
+            // support. See docs/research/indic_evals.md.
+            EvalIndic.run(args: Array(args.dropFirst()))
         case "finetune":
             Finetune.run(args: Array(args.dropFirst()))
         case "sft":
@@ -253,6 +278,9 @@ struct TinyGPT {
           tinygpt validate <path>    round-trip check: read → encode → byte-compare
           tinygpt bench [flags]      inference-side LLM benchmark harness (Bench360-modelled)
           tinygpt bench-train [flags] training-throughput benchmark vs. WebGPU baseline
+          tinygpt screen <sub> ...   Mac screen-reading scaffold (Wave 2.6)
+                                     subs: capture | tree | both
+                                     see `tinygpt screen --help` for flags
 
         file format documented in Sources/TinyGPTIO/TinyGPTFile.swift.
         bench flags documented in `tinygpt bench --help`.

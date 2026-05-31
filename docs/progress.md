@@ -98,7 +98,16 @@ Wave 2.6 ── realtime + cloud escalation + tools (current)
         ✅ Mac decode jitter baseline measured (M5 Pro)
         ⬜ Continue.dev / Ollama-compat provider adapter
         ⬜ Tool-call extractor (mini-router) — tiny BERT-class classifier
-        ⬜ ScreenCaptureKit + macOS Accessibility (AX) integration
+        ⚠️ ScreenCaptureKit + macOS Accessibility (AX) integration
+            — TinyGPTScreen target shipped: AccessibilityTree.readFocused()
+              works end-to-end from CLI; `tinygpt screen tree` returns AX
+              JSON for the focused window once Accessibility is granted.
+            — ScreenCapture.captureActiveWindow() compiles + links but
+              the bare CLI process fails CGS init ("Assertion failed:
+              did_initialize"), so window capture only works from a GUI
+              terminal context (Terminal.app / iTerm / Ghostty that has
+              Screen Recording permission). Documented in Screen.swift.
+            — Vision-encoder / ViT half deliberately deferred (research-grade)
         ⬜ Vision encoder (ViT) → tinygpt decoder
         ⬜ Async tool-call dispatch (start exec while args still streaming)
         ⬜ Cold-start TTFT < 50ms on 1B+ models (unmeasured)

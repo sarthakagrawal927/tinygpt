@@ -26,6 +26,14 @@ let package = Package(
         // we can unit-test the registry / format detector without
         // pulling MLX. See docs/hf_datasets_integration.md.
         .library(name: "TinyGPTData", targets: ["TinyGPTData"]),
+        // TinyGPTScreen — Mac screen-reading scaffold (Wave 2.6).
+        // ScreenCaptureKit window capture + macOS Accessibility (AX) tree
+        // reader. Pure Foundation + ScreenCaptureKit + ApplicationServices;
+        // deliberately holds no model dependencies so it stays linkable
+        // from any CLI subcommand (and so the agent can call it before
+        // any model is loaded). The vision-encoder/ViT half (consuming
+        // PNG → tokens) is intentionally NOT in this target.
+        .library(name: "TinyGPTScreen", targets: ["TinyGPTScreen"]),
         .executable(name: "tinygpt", targets: ["TinyGPT"]),
         .executable(name: "TinyGPTApp", targets: ["TinyGPTApp"]),
     ],
@@ -49,6 +57,15 @@ let package = Package(
         // list-datasets).
         .target(
             name: "TinyGPTData"
+        ),
+        // See the library declaration above for rationale. This target is
+        // pure Foundation + ScreenCaptureKit + ApplicationServices (linked
+        // via the AppKit umbrella through Foundation autolinking) — no MLX,
+        // no model code. Build constraint: macOS 14 (already the package
+        // platform floor), which has the SCContentFilter(desktopIndependent
+        // Window:) initialiser we use.
+        .target(
+            name: "TinyGPTScreen"
         ),
         .target(
             name: "TinyGPTModel",
@@ -98,6 +115,7 @@ let package = Package(
                 "TinyGPTBench",
                 "TinyGPTServe",
                 "TinyGPTData",
+                "TinyGPTScreen",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
