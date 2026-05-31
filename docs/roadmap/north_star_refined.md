@@ -83,8 +83,10 @@ That's a product. Every piece below is grounded in user-stated vision.
 | **Screen reading — UI tree** | ⬜ macOS Accessibility (AX) APIs | 3-5 days |
 | **Screen reading — vision model** | ⬜ Small ViT encoder → tinygpt decoder | 2 weeks |
 | **Cloud-escalation training** | ⬜ Train model to emit `{"defer_to_cloud": ...}` when uncertain | 1 week |
-| **Cloud API client** | ⬜ HTTP wrapper for Claude/OpenAI/local-server | 2 days |
-| **Router model** | ⬜ Tiny (~100M) classifier-style router | 1-2 weeks |
+| **Cloud API client** | ✅ curl-shellout for Anthropic + OpenAI (commit ef0e5e3) |  |
+| **SSE streaming on serve** | ✅ OpenAI-compat per-token streaming + cancellation (e754d6c, c11265b) |  |
+| **Tool-call extractor (mini-router)** | ⬜ Tiny encoder (~30-100M, BERT-class) → classification head over the tool catalog. Pre-step before the full LM forward pass: given the user query + active tool catalog, picks which tool (and rough arg slots). Way cheaper than letting the full LM hallucinate the choice — runs in <5ms even on CPU, no KV cache needed. A focused special case of the broader Router model. | 1 week |
+| **Router model** | ⬜ Tiny (~100M) classifier-style router for specialist selection (debugger vs shell vs SQL vs cloud). Sibling to the tool-call extractor, but routes between models instead of tools. | 1-2 weeks |
 | **Multilingual** | 🟡 Tokenizer-side OK (smollm2 / Qwen3 vocabs); need eval | 1 week |
 
 ## Critical research dives needed
@@ -247,7 +249,16 @@ roughly:
 
 4. **The router is a small model itself.** ~100M classifier-style. We
    have the infrastructure but no training pipeline tuned for the
-   "which specialist handles this?" classification task.
+   "which specialist handles this?" classification task. The
+   **tool-call extractor** is a smaller sibling — encoder-only,
+   classification over a fixed tool catalog. It's easier (no
+   generation, no KV cache, fits comfortably in CPU) and a good
+   warm-up project before the bigger router. Possible
+   training signal: scrape tool-using agent traces (from Anthropic /
+   OpenAI tool-use datasets, BFCL, τ-bench), pair (query, tool_name)
+   as supervised examples, train a tiny encoder + softmax head. Could
+   plausibly be a sub-30M model that beats LM-emitted tool calls on
+   latency by 50-100x.
 
 5. **Compute budget reality.** Training a 1.5B specialist properly is
    24-48 GPU hours. On a Mac with the existing infra, that's
