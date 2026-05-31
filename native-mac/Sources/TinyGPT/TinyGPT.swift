@@ -151,6 +151,27 @@ struct TinyGPT {
         // for `agent` into the switch below (next to `case "sample":`)
         // and delete the pre-switch shim above.
         //
+        // Pre-switch shim for the tool-call extractor (mini-router) —
+        // Wave 2.6 scaffold. Three subcommands form the pipeline:
+        //   extractor-data    — build (query, tool) JSONL from BFCL / τ-bench / synth
+        //   train-extractor   — train a ToolRouterModel + write router.tinygpt
+        //   extract           — run a router checkpoint over a query
+        // See docs/tool_call_extractor.md for design + training notes.
+        // TODO(extractor-merge): roll into the case block once the
+        // training infra has been smoke-tested on a real corpus.
+        if cmd == "extractor-data" {
+            ExtractorData.run(args: Array(args.dropFirst()))
+            return
+        }
+        if cmd == "train-extractor" {
+            TrainExtractor.run(args: Array(args.dropFirst()))
+            return
+        }
+        if cmd == "extract" {
+            Extract.run(args: Array(args.dropFirst()))
+            return
+        }
+        //
         // Pre-switch shim for the Wave 2.6 screen-reading scaffold.
         //   tinygpt screen capture --out window.png       — PNG via ScreenCaptureKit
         //   tinygpt screen tree    [--out tree.json]      — AX tree as JSON

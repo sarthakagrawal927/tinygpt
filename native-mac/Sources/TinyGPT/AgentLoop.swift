@@ -68,6 +68,31 @@ public final class AgentLoop {
     private let cloudEscalateProvider: CloudEscalate.Provider?
     private let cloudEscalateModel: String?
 
+    // Tool-call extractor (mini-router) — Wave 2.6 scaffold.
+    //
+    // Carrying state for the optional pre-step that runs BEFORE every
+    // LM tool-call generation. When set, `runTurn` queries the router
+    // with the user's text; if the top-class softmax exceeds the
+    // threshold the router's pick is logged + can be fed downstream as
+    // a constrained-decode hint. The full constraint-injection path
+    // (steering the JSON schema FSM to one tool name) is left as a
+    // TODO — see docs/tool_call_extractor.md §"Integration with
+    // ConstrainedGen" — because the FSM doesn't currently expose a
+    // "pin one tool" entrypoint. Today the loop simply records the
+    // router's prediction in the transcript so downstream consumers
+    // (a future MCP-style supervisor) can decide what to do.
+    public struct RouterHook {
+        public let router: ToolRouterModel
+        public let labels: [String]
+        public let threshold: Float
+        public init(router: ToolRouterModel, labels: [String], threshold: Float) {
+            self.router = router
+            self.labels = labels
+            self.threshold = threshold
+        }
+    }
+    private let routerHook: RouterHook?
+
     /// Token boundary the agent expects between turns. We use a ChatML-ish
     /// scheme so models trained with that template have a fighting chance
     /// of producing the right shape. For byte-level models this is just
@@ -85,8 +110,10 @@ public final class AgentLoop {
                 transcriptURL: URL? = nil, jsonOut: Bool = false,
                 maxAgentSteps: Int = 8,
                 cloudEscalateProvider: CloudEscalate.Provider? = nil,
-                cloudEscalateModel: String? = nil)
+                cloudEscalateModel: String? = nil,
+                routerHook: RouterHook? = nil)
     {
+        self.routerHook = routerHook
         self.model = model
         self.cfg = cfg
         self.tokenizer = tokenizer
@@ -217,6 +244,29 @@ public final class AgentLoop {
     /// text we fell back to when JSON parsing failed).
     public func runTurn(userText: String) -> String {
         recordEvent(event: ["type": "user", "text": userText])
+        // Tool-call extractor pre-step. Runs BEFORE the LM forward
+        // pass — predicts the most likely tool from the user query
+        // alone (no system prompt, no tool catalog). High-confidence
+        // picks are logged + made visible to downstream consumers via
+        // the transcript. Constrained-decode injection (steering the
+        // JSON FSM to a single tool name) is a TODO.
+        if let hook = routerHook {
+            let pred = predictWithRouter(hook: hook, query: userText)
+            recordEvent(event: [
+                "type": "router_prediction",
+                "tool": pred.tool,
+                "prob": pred.prob,
+                "fired": pred.prob >= hook.threshold,
+            ])
+            if jsonOut {
+                emitJSONEvent([
+                    "type": "router_prediction",
+                    "tool": pred.tool,
+                    "prob": pred.prob,
+                    "fired": pred.prob >= hook.threshold,
+                ])
+            }
+        }
         // Append the user message to the cache.
         feedText(userPreface + userText + userSuffix)
         var lastAnswer: String? = nil
@@ -421,6 +471,33 @@ public final class AgentLoop {
         lastFedToken = ids.last!
         let arr = MLXArray(ids.map { Int32($0) }, [1, ids.count])
         _ = model.forwardCached(arr, cache: cache)
+    }
+
+    // MARK: - Router pre-step
+
+    /// Predict the most-likely tool for `query` using the loaded
+    /// router checkpoint. Returns the top-1 tool name + softmax
+    /// probability. Byte-level encode + pad to the router's context
+    /// length — matches `TrainExtractor.encode` exactly so the
+    /// distribution shift between train and inference is zero.
+    private func predictWithRouter(hook: RouterHook, query: String)
+        -> (tool: String, prob: Float)
+    {
+        let cfg = hook.router.config
+        var ids = [UInt8](query.utf8)
+            .prefix(cfg.contextLength)
+            .map { Int32($0) }
+        // Clamp + pad.
+        for i in 0..<ids.count {
+            if ids[i] < 0 || ids[i] >= Int32(cfg.vocabSize) { ids[i] = 0 }
+        }
+        while ids.count < cfg.contextLength { ids.append(0) }
+        let x = MLXArray(ids, [1, cfg.contextLength])
+        let top = hook.router.topK(idx: x, k: 1)
+        guard let first = top.first else { return ("?", 0) }
+        let name = (first.classIdx >= 0 && first.classIdx < hook.labels.count)
+            ? hook.labels[first.classIdx] : "?"
+        return (name, first.prob)
     }
 
     // MARK: - Tokenization

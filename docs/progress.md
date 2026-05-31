@@ -97,7 +97,10 @@ Wave 2.6 ── realtime + cloud escalation + tools (current)
         ✅ CloudEscalate wired into AgentLoop (--cloud-escalate flag)
         ✅ Mac decode jitter baseline measured (M5 Pro)
         ⬜ Continue.dev / Ollama-compat provider adapter
-        ⬜ Tool-call extractor (mini-router) — tiny BERT-class classifier
+        ⚠️ Tool-call extractor (mini-router) — scaffold landed: ToolRouterModel +
+            extractor-data / train-extractor / extract CLIs + --router agent flag.
+            No router trained yet; FSM constraint-injection still a TODO.
+            See docs/tool_call_extractor.md.
         ⚠️ ScreenCaptureKit + macOS Accessibility (AX) integration
             — TinyGPTScreen target shipped: AccessibilityTree.readFocused()
               works end-to-end from CLI; `tinygpt screen tree` returns AX

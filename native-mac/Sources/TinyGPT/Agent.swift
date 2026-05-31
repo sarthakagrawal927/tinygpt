@@ -36,6 +36,13 @@ enum Agent {
         var preAllocate = true
         var cloudEscalate: String? = nil    // "anthropic" or "openai"
         var cloudEscalateModel: String? = nil
+        // Tool-call extractor (mini-router) — Wave 2.6 scaffold.
+        // When set, the agent loads the router checkpoint at startup
+        // and, on each user turn, predicts the most likely tool BEFORE
+        // the LM is asked to choose. If confidence ≥ routerThreshold,
+        // the prediction is fed to the LM as a constrained-decode hint.
+        var routerPath: String? = nil
+        var routerThreshold: Float = 0.7
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -80,6 +87,12 @@ enum Agent {
             case "--cloud-escalate-model":
                 guard i + 1 < args.count else { exitUsage() }
                 cloudEscalateModel = args[i + 1]; i += 2
+            case "--router":
+                guard i + 1 < args.count else { exitUsage() }
+                routerPath = args[i + 1]; i += 2
+            case "--router-threshold":
+                guard i + 1 < args.count else { exitUsage() }
+                routerThreshold = Float(args[i + 1]) ?? routerThreshold; i += 2
             case "-h", "--help":
                 exitUsage()
             default:
@@ -203,6 +216,30 @@ enum Agent {
                    (cloudEscalateModel.map { ", model=\($0)" } ?? "") + "\n", stderr)
         }
 
+        // Tool-call extractor (mini-router) — optional pre-step.
+        // When `--router <path>` is set, load the checkpoint + label
+        // sidecar. The loop uses it to predict the most likely tool
+        // before the LM forward pass; ≥ threshold → constrained-decode
+        // hint, else fall through to normal LM-chooses behaviour.
+        var routerHook: AgentLoop.RouterHook? = nil
+        if let routerPath = routerPath {
+            do {
+                let labelsURL = ToolRouterLabels.sidecarURL(
+                    forCheckpoint: URL(fileURLWithPath: routerPath))
+                let labels = try ToolRouterLabels.load(from: labelsURL)
+                let router = try ToolRouterLoader.load(
+                    path: routerPath, numClasses: labels.labels.count)
+                routerHook = AgentLoop.RouterHook(
+                    router: router,
+                    labels: labels.labels,
+                    threshold: routerThreshold)
+                fputs("agent: router loaded — \(labels.labels.count) classes" +
+                      String(format: ", threshold=%.2f\n", routerThreshold), stderr)
+            } catch {
+                fputs("agent: --router load failed (\(error)); continuing without router\n", stderr)
+            }
+        }
+
         let loop = AgentLoop(
             model: model, cfg: cfg, tokenizer: tokenizer,
             schema: schema, cache: cache!,
@@ -211,7 +248,8 @@ enum Agent {
             transcriptURL: transcriptURL, jsonOut: jsonOut,
             maxAgentSteps: maxSteps,
             cloudEscalateProvider: cloudProvider,
-            cloudEscalateModel: cloudEscalateModel
+            cloudEscalateModel: cloudEscalateModel,
+            routerHook: routerHook
         )
 
         // Prefill (no-op if loaded from disk).
@@ -308,6 +346,16 @@ enum Agent {
                                  Requires ANTHROPIC_API_KEY / OPENAI_API_KEY in env.
         --cloud-escalate-model M Override the cloud model name. Defaults:
                                  anthropic→claude-sonnet-4-5, openai→gpt-4o-mini.
+
+        Tool-call extractor (mini-router) — Wave 2.6 scaffold:
+        --router <path>          Load a router checkpoint trained via
+                                 `tinygpt train-extractor`. Before the LM
+                                 forward pass, the router predicts which
+                                 tool best matches the user query; high-
+                                 confidence picks are fed to the LM as a
+                                 constrained-decode hint.
+        --router-threshold F     Minimum softmax confidence to fire the
+                                 router (default: 0.7).
 
         examples:
           tinygpt agent specialist.tinygpt --tools tools.json
