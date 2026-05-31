@@ -101,15 +101,29 @@ public enum Serve {
                               (useful when running lm-eval on long-prompt tasks
                                like MMLU-Pro where the harness sometimes overshoots)
 
-        Endpoints:
-          POST /v1/chat/completions   OpenAI ChatCompletion (messages: [...])
-          POST /v1/completions        OpenAI Completion (prompt: "...")
+        Endpoints (OpenAI surface):
+          POST /v1/chat/completions   OpenAI ChatCompletion (SSE if stream:true)
+          POST /v1/completions        OpenAI Completion (SSE if stream:true)
           GET  /v1/models             list loaded model
 
-        Designed for lm-evaluation-harness `local-chat-completions` adapter.
-        Example: lm-eval --model local-chat-completions \\
-                    --tasks hellaswag,arc_easy --model_args \\
-                    "base_url=http://127.0.0.1:8080/v1/chat/completions,model=tinygpt"
+        Endpoints (Ollama surface — Continue.dev / Cline / Aider):
+          POST /api/chat              Ollama chat (NDJSON stream by default)
+          POST /api/generate          Ollama completion (NDJSON stream by default)
+          GET  /api/tags              Ollama model list
+          GET  /api/version           Ollama version probe
+          POST /api/show              Ollama model info
+
+        For lm-eval (OpenAI surface):
+          lm-eval --model local-chat-completions \\
+              --tasks hellaswag,arc_easy --model_args \\
+              "base_url=http://127.0.0.1:8080/v1/chat/completions,model=tinygpt"
+
+        For Continue.dev (Ollama surface) — run with --port 11434 and add
+        to ~/.continue/config.json:
+          { "models": [{ "title": "tinygpt", "provider": "ollama",
+                          "model": "tinygpt:latest",
+                          "apiBase": "http://127.0.0.1:11434" }] }
+        See docs/continue_provider.md for the full walkthrough.
         """)
         exit(2)
     }
@@ -308,6 +322,33 @@ extension Serve {
                 handleCompletions(clientFd: clientFd, body: request.body)
                 return
             }
+
+            // Ollama-compatible surface — Continue.dev / Cline / Aider
+            // configured with `provider: ollama` talk to tinygpt directly.
+            // NDJSON streaming (not SSE); shared generation core with the
+            // OpenAI handlers above. See docs/continue_provider.md.
+            if request.method == "GET" && request.path == "/api/tags" {
+                handleOllamaTags(clientFd: clientFd)
+                return
+            }
+            if request.method == "GET" && request.path == "/api/version" {
+                respondJSON(clientFd: clientFd, status: 200,
+                             payload: ["version": "0.5.0-tinygpt"])
+                return
+            }
+            if request.method == "POST" && request.path == "/api/show" {
+                handleOllamaShow(clientFd: clientFd, body: request.body)
+                return
+            }
+            if request.method == "POST" && request.path == "/api/chat" {
+                handleOllamaChat(clientFd: clientFd, body: request.body)
+                return
+            }
+            if request.method == "POST" && request.path == "/api/generate" {
+                handleOllamaGenerate(clientFd: clientFd, body: request.body)
+                return
+            }
+
             respond(clientFd: clientFd, status: 404, body: "not found: \(request.method) \(request.path)")
         }
 
@@ -617,6 +658,210 @@ extension Serve {
         @discardableResult
         private func writeSSETerminator(clientFd: Int32) -> Bool {
             return writeAll(clientFd: clientFd, data: Data("data: [DONE]\n\n".utf8))
+        }
+
+        // MARK: Ollama-compatible endpoints
+
+        /// `GET /api/tags` — Ollama's model-list endpoint. Continue.dev /
+        /// Cline / Aider use it to discover what models the server hosts.
+        /// We always have exactly one ("tinygpt"); the response shape mirrors
+        /// Ollama's so the client doesn't need a special case.
+        private func handleOllamaTags(clientFd: Int32) {
+            let now = ISO8601DateFormatter().string(from: Date())
+            let payload: [String: Any] = [
+                "models": [[
+                    "name": "tinygpt:latest",
+                    "model": "tinygpt:latest",
+                    "modified_at": now,
+                    "size": 0,
+                    "digest": "tinygpt-\(config.modelName)",
+                    "details": [
+                        "format": "tinygpt",
+                        "family": "tinygpt",
+                        "parameter_size": "\(model.numParameters())",
+                        "quantization_level": "F32"
+                    ] as [String: Any]
+                ] as [String: Any]]
+            ]
+            respondJSON(clientFd: clientFd, status: 200, payload: payload)
+        }
+
+        /// `POST /api/show` — Ollama's model-info endpoint. Continue.dev
+        /// pings this to verify a model is loaded.
+        private func handleOllamaShow(clientFd: Int32, body: Data) {
+            let payload: [String: Any] = [
+                "modelfile": "# tinygpt model",
+                "parameters": "stop \"<|im_end|>\"",
+                "template": "{{ .System }}\n{{ .Prompt }}",
+                "details": [
+                    "format": "tinygpt",
+                    "family": "tinygpt",
+                    "parameter_size": "\(model.numParameters())",
+                    "quantization_level": "F32"
+                ] as [String: Any]
+            ]
+            respondJSON(clientFd: clientFd, status: 200, payload: payload)
+        }
+
+        /// `POST /api/chat` — Ollama chat endpoint. NDJSON streaming by
+        /// default; explicit `stream: false` for one-shot.
+        private func handleOllamaChat(clientFd: Int32, body: Data) {
+            do {
+                guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                    respond(clientFd: clientFd, status: 400, body: "json must be object"); return
+                }
+                let messages = (json["messages"] as? [[String: Any]]) ?? []
+                let prompt = renderChatMessages(messages)
+                let options = (json["options"] as? [String: Any]) ?? [:]
+                let maxTokens = (options["num_predict"] as? Int) ?? 256
+                let temperature = (options["temperature"] as? Double).map { Float($0) } ?? 0.0
+                let stop = readStopParam(options["stop"])
+                let stream = (json["stream"] as? Bool) ?? true
+
+                if stream {
+                    streamOllamaChat(clientFd: clientFd, prompt: prompt,
+                                      maxTokens: maxTokens, temperature: temperature,
+                                      stop: stop)
+                    return
+                }
+                let (text, promptTokens, completionTokens) = try inferenceQueue.sync {
+                    try self.generate(prompt: prompt, maxTokens: maxTokens,
+                                       temperature: temperature, stop: stop)
+                }
+                let payload: [String: Any] = [
+                    "model": "tinygpt:latest",
+                    "created_at": ISO8601DateFormatter().string(from: Date()),
+                    "message": ["role": "assistant", "content": text] as [String: Any],
+                    "done": true,
+                    "done_reason": "stop",
+                    "prompt_eval_count": promptTokens,
+                    "eval_count": completionTokens
+                ]
+                respondJSON(clientFd: clientFd, status: 200, payload: payload)
+            } catch {
+                respond(clientFd: clientFd, status: 500, body: "error: \(error)")
+            }
+        }
+
+        /// `POST /api/generate` — Ollama completion endpoint.
+        private func handleOllamaGenerate(clientFd: Int32, body: Data) {
+            do {
+                guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                    respond(clientFd: clientFd, status: 400, body: "json must be object"); return
+                }
+                let prompt = (json["prompt"] as? String) ?? ""
+                let options = (json["options"] as? [String: Any]) ?? [:]
+                let maxTokens = (options["num_predict"] as? Int) ?? 256
+                let temperature = (options["temperature"] as? Double).map { Float($0) } ?? 0.0
+                let stop = readStopParam(options["stop"])
+                let stream = (json["stream"] as? Bool) ?? true
+
+                if stream {
+                    streamOllamaGenerate(clientFd: clientFd, prompt: prompt,
+                                          maxTokens: maxTokens, temperature: temperature,
+                                          stop: stop)
+                    return
+                }
+                let (text, promptTokens, completionTokens) = try inferenceQueue.sync {
+                    try self.generate(prompt: prompt, maxTokens: maxTokens,
+                                       temperature: temperature, stop: stop)
+                }
+                let payload: [String: Any] = [
+                    "model": "tinygpt:latest",
+                    "created_at": ISO8601DateFormatter().string(from: Date()),
+                    "response": text,
+                    "done": true,
+                    "done_reason": "stop",
+                    "prompt_eval_count": promptTokens,
+                    "eval_count": completionTokens
+                ]
+                respondJSON(clientFd: clientFd, status: 200, payload: payload)
+            } catch {
+                respond(clientFd: clientFd, status: 500, body: "error: \(error)")
+            }
+        }
+
+        private func streamOllamaChat(clientFd: Int32, prompt: String,
+                                        maxTokens: Int, temperature: Float,
+                                        stop: [String]) {
+            writeNDJSONHead(clientFd: clientFd)
+            var clientGone = false
+            do {
+                try inferenceQueue.sync {
+                    try self.generateStreaming(prompt: prompt, maxTokens: maxTokens,
+                                                temperature: temperature, stop: stop)
+                    { newText in
+                        let chunk: [String: Any] = [
+                            "model": "tinygpt:latest",
+                            "created_at": ISO8601DateFormatter().string(from: Date()),
+                            "message": ["role": "assistant", "content": newText] as [String: Any],
+                            "done": false
+                        ]
+                        let ok = self.writeNDJSONLine(clientFd: clientFd, payload: chunk)
+                        if !ok { clientGone = true }
+                        return ok
+                    }
+                }
+            } catch { /* fall through to terminator */ }
+            if clientGone { return }
+            writeNDJSONLine(clientFd: clientFd, payload: [
+                "model": "tinygpt:latest",
+                "created_at": ISO8601DateFormatter().string(from: Date()),
+                "message": ["role": "assistant", "content": ""] as [String: Any],
+                "done": true,
+                "done_reason": "stop"
+            ])
+        }
+
+        private func streamOllamaGenerate(clientFd: Int32, prompt: String,
+                                            maxTokens: Int, temperature: Float,
+                                            stop: [String]) {
+            writeNDJSONHead(clientFd: clientFd)
+            var clientGone = false
+            do {
+                try inferenceQueue.sync {
+                    try self.generateStreaming(prompt: prompt, maxTokens: maxTokens,
+                                                temperature: temperature, stop: stop)
+                    { newText in
+                        let chunk: [String: Any] = [
+                            "model": "tinygpt:latest",
+                            "created_at": ISO8601DateFormatter().string(from: Date()),
+                            "response": newText,
+                            "done": false
+                        ]
+                        let ok = self.writeNDJSONLine(clientFd: clientFd, payload: chunk)
+                        if !ok { clientGone = true }
+                        return ok
+                    }
+                }
+            } catch { /* fall through to terminator */ }
+            if clientGone { return }
+            writeNDJSONLine(clientFd: clientFd, payload: [
+                "model": "tinygpt:latest",
+                "created_at": ISO8601DateFormatter().string(from: Date()),
+                "response": "",
+                "done": true,
+                "done_reason": "stop"
+            ])
+        }
+
+        @discardableResult
+        private func writeNDJSONHead(clientFd: Int32) -> Bool {
+            var head = "HTTP/1.1 200 OK\r\n"
+            head += "Content-Type: application/x-ndjson; charset=utf-8\r\n"
+            head += "Cache-Control: no-cache\r\n"
+            head += "Connection: close\r\n"
+            head += "X-Accel-Buffering: no\r\n"
+            head += "\r\n"
+            return writeAll(clientFd: clientFd, data: Data(head.utf8))
+        }
+
+        @discardableResult
+        private func writeNDJSONLine(clientFd: Int32, payload: [String: Any]) -> Bool {
+            guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return false }
+            var frame = data
+            frame.append(Data("\n".utf8))
+            return writeAll(clientFd: clientFd, data: frame)
         }
 
         private func readStopParam(_ raw: Any?) -> [String] {

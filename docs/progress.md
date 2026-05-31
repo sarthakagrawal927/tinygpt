@@ -29,12 +29,17 @@ work ships.
 Targets from `docs/roadmap/north_star_refined.md` §realtime:
 
 ```
-TTFT (warm):     < 50 ms        ░░░░░░░░░░░░░░░░░░░░  current 5.8 ms p99   ✅ 10× under
-ITL p99:         < 30 ms        ░░░░░░░░░░░░░░░░░░░░  current 4.9 ms p99   ✅  6× under
-Decode tok/s:    > 50 tok/s     ████████████████████  current 293 tok/s    ✅  6× over
-Cold start TTFT: < 50 ms        ?????????????????????  unmeasured           pending
-Energy J/token:  < 0.5 J        ?????????????????????  unmeasured (sudo)    pending
+TTFT (warm):       < 50 ms       ░░░░░░░░░░░░░░░░░░░░ current 5.8 ms p99      ✅ 10× under
+ITL p99:           < 30 ms       ░░░░░░░░░░░░░░░░░░░░ current 4.9 ms p99      ✅  6× under
+Decode tok/s:      > 50 tok/s    ████████████████████ current 293 tok/s       ✅  6× over
+Cold start TTFT*:  < 50 ms       ░░░░░░░░░░░░░░░░░░░░ current 24 ms (1B)      ✅  2× under
+Cold launch wall:  no hard target ░░░░░░░░░░░░░░░░░░░ current 1065 ms (1B)    informational
+Energy J/token:    < 0.5 J       ????????????????????? unmeasured (sudo)      pending
 ```
+
+*"Cold start TTFT" = first prefill TTFT after model load (in-process). "Cold
+launch wall" = process start + model load + first prefill + first token,
+measured end-to-end for the ~1B mega-pilot checkpoint.
 
 (Bars: `█` filled = at/above target  ·  `░` headroom = below target  ·  `?` = unmeasured)
 
@@ -96,7 +101,11 @@ Wave 2.6 ── realtime + cloud escalation + tools (current)
         ✅ SSE cancellation on client disconnect (SIGPIPE-safe)
         ✅ CloudEscalate wired into AgentLoop (--cloud-escalate flag)
         ✅ Mac decode jitter baseline measured (M5 Pro)
-        ⬜ Continue.dev / Ollama-compat provider adapter
+        ✅ Continue.dev / Ollama-compat provider adapter — /api/tags,
+            /api/version, /api/show, /api/chat, /api/generate on the same
+            serve socket as the OpenAI surface. NDJSON streaming. Smoke-
+            tested end-to-end with the gallery model. See
+            docs/continue_provider.md for Continue/Cline/Aider configs.
         ⚠️ Tool-call extractor (mini-router) — scaffold landed: ToolRouterModel +
             extractor-data / train-extractor / extract CLIs + --router agent flag.
             No router trained yet; FSM constraint-injection still a TODO.
@@ -112,8 +121,13 @@ Wave 2.6 ── realtime + cloud escalation + tools (current)
               Screen Recording permission). Documented in Screen.swift.
             — Vision-encoder / ViT half deliberately deferred (research-grade)
         ⬜ Vision encoder (ViT) → tinygpt decoder
-        ⬜ Async tool-call dispatch (start exec while args still streaming)
-        ⬜ Cold-start TTFT < 50ms on 1B+ models (unmeasured)
+        ⏸ Async tool-call dispatch — INVESTIGATED, SKIPPED. LM dominates
+            by 5-100× over subprocess; flavor #1 (streaming overlap) saves
+            ~10ms, flavor #2 (parallel tools) needs a specialist that emits
+            them. See docs/async_tool_dispatch.md — revisit when the
+            tool-call extractor + parallel-tool specialist ship.
+        ✅ Cold-start TTFT measured on 1B+ models — in-process 24ms (< 50ms target);
+            cold launch wall 1065ms end-to-end (process + load + first gen)
 
 Wave 3  ─── specialists (deferred until 2.6 done)
         ⬜ Debugger specialist (GitHub issue→PR pairs)
