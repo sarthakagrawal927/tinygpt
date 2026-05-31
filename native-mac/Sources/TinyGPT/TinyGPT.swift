@@ -72,6 +72,27 @@ struct TinyGPT {
             ListDatasets.run(args: Array(args.dropFirst()))
             return
         }
+        // Pre-switch shim for the CF R2 cloud save/load pipeline.
+        // `tinygpt push <local.tinygpt> --tag <name>` — upload checkpoint
+        // `tinygpt pull --tag <name> [--out path]` — download checkpoint
+        // `tinygpt cloud {list|delete|setup}` — bucket management
+        // Shells out to `aws` CLI with R2's S3-compatible endpoint.
+        // Credentials in env or ~/.config/tinygpt/r2.env. See R2Client.swift
+        // and docs/cloud_save_load.md.
+        if cmd == "push" {
+            CloudPush.run(args: Array(args.dropFirst()))
+            return
+        }
+        if cmd == "pull" {
+            CloudPull.run(args: Array(args.dropFirst()))
+            return
+        }
+        if cmd == "cloud" {
+            CloudList.run(args: Array(args.dropFirst()))
+            return
+        }
+        // TODO(cloud-merge): roll up push/pull/cloud into the switch
+        // below once the dispatch pattern is settled.
         // Pre-switch shim for the GitHub data pipeline. Same shim
         // pattern as download-dataset/list-datasets above: kept on the
         // safe side of the case list until the corpus extractor is
