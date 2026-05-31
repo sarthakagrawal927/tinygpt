@@ -148,6 +148,11 @@ Wave 4  ─── polish + research
 Status legend: ✅ shipped · ❌ dropped (with reason) · ⏸ deferred ·
 ⬜ pending · ⚠️ partial
 
+**Feature audit (2026-05-31)**: every CLI subcommand smoke-tested
+end-to-end on M5 Pro. Datasets / quantization / fine-tuning / all
+other features confirmed working. See
+[feature_audit_2026_05_31.md](feature_audit_2026_05_31.md).
+
 ## Capabilities shipped — Web track
 
 ```
