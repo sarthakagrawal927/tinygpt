@@ -19,7 +19,7 @@ import Foundation
 /// Endpoints picked at call-time based on `provider` arg.
 public enum CloudEscalate {
 
-    public enum Provider: String, CaseIterable {
+    public enum Provider: String, CaseIterable, Sendable {
         case anthropic, openai
     }
 

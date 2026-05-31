@@ -76,7 +76,7 @@ public final class AgentLoop {
     // threshold the router's pick is logged + can be fed downstream as
     // a constrained-decode hint. The full constraint-injection path
     // (steering the JSON schema FSM to one tool name) is left as a
-    // TODO — see docs/tool_call_extractor.md §"Integration with
+    // Follow-up: see docs/tool_call_extractor.md §"Integration with
     // ConstrainedGen" — because the FSM doesn't currently expose a
     // "pin one tool" entrypoint. Today the loop simply records the
     // router's prediction in the transcript so downstream consumers
@@ -249,7 +249,7 @@ public final class AgentLoop {
         // alone (no system prompt, no tool catalog). High-confidence
         // picks are logged + made visible to downstream consumers via
         // the transcript. Constrained-decode injection (steering the
-        // JSON FSM to a single tool name) is a TODO.
+        // JSON FSM to a single tool name) is a follow-up.
         if let hook = routerHook {
             let pred = predictWithRouter(hook: hook, query: userText)
             recordEvent(event: [
