@@ -118,7 +118,12 @@ Wave 3  ─── specialists (deferred until 2.6 done)
 
 Wave 4  ─── polish + research
         ⬜ Multilingual specialist (Sarvam-Edge / Airavata base, NOT desi-max)
-        ⬜ MILU + IndicGenBench evals wired into harness
+        ⚠️  MILU + IndicGenBench evals wired into harness
+            (`tinygpt eval-indic` ships MILU MCQ + IndicXQuAD scoring;
+             datasets must be pre-fetched via `download-dataset`;
+             smoke run validates the pipeline end-to-end; full
+             baseline pending real-data run — see
+             docs/research/indic_evals.md)
         ⬜ Mac app demo
         ⬜ Public model card on HF Hub + writeup
 ```
@@ -155,6 +160,7 @@ Browser learning artifacts
         ✅ docs/research/wave_2_5_kernel_audit.md (this audit's verdicts)
         ✅ docs/research/wave_4_landscape.md (TML / Apple FM / agents / Indic)
         ✅ docs/research/mac_decode_baseline_m5pro.md (this baseline)
+        ✅ docs/research/indic_evals.md (MILU + IndicGenBench wiring)
 ```
 
 ## Browser training: lever stack (1.0× → 17.2× equivalent)
